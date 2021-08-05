@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-05 10:57:30
+# @Last Modified time: 2021-08-05 12:02:47
 
 import os
 from collections import defaultdict, Iterable
@@ -348,20 +348,24 @@ def sanitize_data(data, ignore='clone_id'):
 
 def validate_airr(data):
     """Validate dtypes in airr table."""
+    int_columns = []
+    for d in data:
+        try:
+            data[d].replace(np.nan, pd.NA).astype("Int64")
+            int_columns.append(d)
+        except:
+            pass
     for _, row in data.iterrows():
         contig = dict(row)
         for k, v in contig.items():
-            if data[k].dtype == np.int64:
+            if (data[k].dtype == np.int64) or (k in int_columns):
                 if pd.isnull(v):
                     contig.update({k: str('')})
             if data[k].dtype == np.float64:
-                try:
-                    # this is to check if this conversion is even possible
-                    # if not possible, it will return an error and break the loop
-                    data[k].replace(np.nan, pd.NA).astype("Int64")
+                if k in int_columns:
                     if pd.isnull(v):
                         contig.update({k: str('')})
-                except:
+                else:
                     if pd.isnull(v):
                         contig.update({k: np.nan})
         for required in [

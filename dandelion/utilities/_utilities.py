@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-05 10:24:42
+# @Last Modified time: 2021-08-05 10:31:02
 
 import os
 from collections import defaultdict, Iterable
@@ -350,15 +350,11 @@ def validate_airr(data):
     for _, row in data.iterrows():
         contig = dict(row)
         for k, v in contig.items():
-            if (data[k].dtype == np.int64) or (data[k].dtype
-                                               == 'Int64') or (data[k].dtype
-                                                               == 'int64'):
+            if (data[k].dtype == np.int64) or (data[k].dtype == pd.Int64Dtype):
                 if pd.isnull(v):
                     contig.update({k: str('')})
-            if (data[k].dtype
-                    == np.float64) or (data[k].dtype
-                                       == 'Float64') or (data[k].dtype
-                                                         == 'float64'):
+            if (data[k].dtype == np.float64) or (data[k].dtype
+                                                 == pd.Float64Dtype):
                 if pd.isnull(v):
                     contig.update({k: np.nan})
         for required in [
@@ -446,5 +442,5 @@ def best_guess_locus(data):
 
 def sanitize_dtype(data):
     for col in data:
-        if data[col].dtype == 'Int64' or data[col].dtype == 'Float64':
+        if (data[col].dtype == pd.Int64Dtype) or (data[col].dtype == pd.Float64Dtype):
             data[col] = data[col].astype(float)

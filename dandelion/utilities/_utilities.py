@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-05 10:24:42
+# @Last Modified time: 2021-08-05 10:57:30
 
 import os
 from collections import defaultdict, Iterable
@@ -321,7 +321,7 @@ def sanitize_data(data, ignore='clone_id'):
         if data[d].dtype == "float64":
             try:
                 data[d].replace(np.nan, pd.NA, inplace=True)
-                data[d] = data[d].astype("Int64")
+                data[d] = data[d].astype("int64")
             except:
                 pass
         if data[d].dtype == 'object':
@@ -331,9 +331,10 @@ def sanitize_data(data, ignore='clone_id'):
                     data[d] = pd.to_numeric(data[d])
                     try:
                         data[d].replace(np.nan, pd.NA, inplace=True)
-                        data[d] = data[d].astype("Int64")
+                        data[d] = data[d].astype("int64")
                     except:
-                        data[d] = data[d].astype("Float64")
+                        data[d].replace(pd.NA, np.nan, inplace=True)
+                        data[d] = data[d].astype("float64")
                 except:
                     data[d].replace(to_replace=[None, np.nan, pd.NA],
                                     value='',
@@ -350,17 +351,19 @@ def validate_airr(data):
     for _, row in data.iterrows():
         contig = dict(row)
         for k, v in contig.items():
-            if (data[k].dtype == np.int64) or (data[k].dtype
-                                               == 'Int64') or (data[k].dtype
-                                                               == 'int64'):
+            if data[k].dtype == np.int64:
                 if pd.isnull(v):
                     contig.update({k: str('')})
-            if (data[k].dtype
-                    == np.float64) or (data[k].dtype
-                                       == 'Float64') or (data[k].dtype
-                                                         == 'float64'):
-                if pd.isnull(v):
-                    contig.update({k: np.nan})
+            if data[k].dtype == np.float64:
+                try:
+                    # this is to check if this conversion is even possible
+                    # if not possible, it will return an error and break the loop
+                    data[k].replace(np.nan, pd.NA).astype("Int64")
+                    if pd.isnull(v):
+                        contig.update({k: str('')})
+                except:
+                    if pd.isnull(v):
+                        contig.update({k: np.nan})
         for required in [
                 'sequence', 'rev_comp', 'sequence_alignment',
                 'germline_alignment', 'v_cigar', 'd_cigar', 'j_cigar'
@@ -446,5 +449,5 @@ def best_guess_locus(data):
 
 def sanitize_dtype(data):
     for col in data:
-        if data[col].dtype == 'Int64' or data[col].dtype == 'Float64':
+        if data[col].dtype == np.int64 or data[col].dtype == np.float64:
             data[col] = data[col].astype(float)

@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-05 10:19:10
+# @Last Modified time: 2021-08-05 10:24:42
 
 import os
 from collections import defaultdict, Iterable
@@ -324,8 +324,6 @@ def sanitize_data(data, ignore='clone_id'):
                 data[d] = data[d].astype("Int64")
             except:
                 pass
-        if data[d].dtype == "int64":
-            data[d] = data[d].astype("Int64")
         if data[d].dtype == 'object':
             if d != ignore:
                 try:
@@ -352,10 +350,15 @@ def validate_airr(data):
     for _, row in data.iterrows():
         contig = dict(row)
         for k, v in contig.items():
-            if data[k].dtype == np.int64:
+            if (data[k].dtype == np.int64) or (data[k].dtype
+                                               == 'Int64') or (data[k].dtype
+                                                               == 'int64'):
                 if pd.isnull(v):
                     contig.update({k: str('')})
-            if data[k].dtype == np.float64:
+            if (data[k].dtype
+                    == np.float64) or (data[k].dtype
+                                       == 'Float64') or (data[k].dtype
+                                                         == 'float64'):
                 if pd.isnull(v):
                     contig.update({k: np.nan})
         for required in [

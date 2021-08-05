@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-01 12:28:39
+# @Last Modified time: 2021-08-05 10:11:00
 
 import os
 from collections import defaultdict, Iterable
@@ -324,6 +324,8 @@ def sanitize_data(data, ignore='clone_id'):
                 data[d] = data[d].astype("Int64")
             except:
                 pass
+        if data[d].dtype == "int64":
+            data[d] = data[d].astype("Int64")
         if data[d].dtype == 'object':
             if d != ignore:
                 try:

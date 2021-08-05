@@ -2,7 +2,7 @@
 # @Author: kt16
 # @Date:   2020-05-12 14:01:32
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2021-08-05 10:14:49
+# @Last Modified time: 2021-08-05 10:19:10
 
 import os
 from collections import defaultdict, Iterable
@@ -352,10 +352,10 @@ def validate_airr(data):
     for _, row in data.iterrows():
         contig = dict(row)
         for k, v in contig.items():
-            if data[k].dtype == 'Int64' or data[k].dtype == 'int64':
+            if data[k].dtype == np.int64:
                 if pd.isnull(v):
                     contig.update({k: str('')})
-            if data[k].dtype == 'Float64' or data[k].dtype == 'float64':
+            if data[k].dtype == np.float64:
                 if pd.isnull(v):
                     contig.update({k: np.nan})
         for required in [

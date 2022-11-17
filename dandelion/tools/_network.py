@@ -2,7 +2,7 @@
 # @Author: Kelvin
 # @Date:   2020-08-12 18:08:04
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2022-11-17 17:47:48
+# @Last Modified time: 2022-11-17 17:59:16
 """network module."""
 import networkx as nx
 import numpy as np
@@ -33,7 +33,7 @@ def generate_network(
     downsample: Optional[int] = None,
     verbose: bool = True,
     compute_layout: bool = True,
-    layout_method: Literal["sfdp", "mod_fr"] = "sfdp",
+    layout_method: Literal["sfdp", "mod_fr"] = "mod_fr",
     **kwargs,
 ) -> Dandelion:
     """

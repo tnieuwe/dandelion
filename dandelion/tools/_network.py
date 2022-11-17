@@ -2,7 +2,7 @@
 # @Author: Kelvin
 # @Date:   2020-08-12 18:08:04
 # @Last Modified by:   Kelvin
-# @Last Modified time: 2022-10-27 10:19:50
+# @Last Modified time: 2022-11-17 17:47:48
 """network module."""
 import networkx as nx
 import numpy as np
@@ -640,6 +640,7 @@ def _generate_layout(
                 print(
                     "To benefit from faster layout computation, please install graph-tool: "
                     "conda install -c conda-forge graph-tool"
+                    "However, please be aware that there may be scaling issues causing the algorithm to fail."
                 )
                 nographtool = True
             if "nographtool" in locals():

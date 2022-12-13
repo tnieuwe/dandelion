@@ -15,6 +15,10 @@ Hi there! I have put together a python package for analyzing single cell BCR/TCR
 
 *Emily Stephenson, Gary Reynolds, Rachel A Botting, Fernando J Calero-Nieto, Michael Morgan, Zewen Kelvin Tuong, Karsten Bach, Waradon Sungnak, Kaylee B Worlock, Masahiro Yoshida, Natsuhiko Kumasaka, Katarzyna Kania, Justin Engelbert, Bayanne Olabi, Jarmila Stremenova Spegarova, Nicola K Wilson, Nicole Mende, Laura Jardine, Louis CS Gardner, Issac Goh, Dave Horsfall, Jim McGrath, Simone Webb, Michael W Mather, Rik GH Lindeboom, Emma Dann, Ni Huang, Krzysztof Polanski, Elena Prigmore, Florian Gothe, Jonathan Scott, Rebecca P Payne, Kenneth F Baker, Aidan T Hanrath, Ina CD Schim van der Loeff, Andrew S Barr, Amada Sanchez-Gonzalez, Laura Bergamaschi, Federica Mescia, Josephine L Barnes, Eliz Kilich, Angus de Wilton, Anita Saigal, Aarash Saleh, Sam M Janes, Claire M Smith, Nusayhah Gopee, Caroline Wilson, Paul Coupland, Jonathan M Coxhead, Vladimir Y Kiselev, Stijn van Dongen, Jaume Bacardit, Hamish W King, Anthony J Rostron, A John Simpson, Sophie Hambleton, Elisa Laurenti, Paul A Lyons, Kerstin B Meyer, Marko Z Nikolic, Christopher JA Duncan, Ken Smith, Sarah A Teichmann, Menna R Clatworthy, John C Marioni, Berthold Gottgens, Muzlifah Haniffa.* ***Single-cell multi-omics analysis of the immune response in COVID-19***. *Nature Medicine 2021.04.20; doi: https://dx.doi.org/10.1038/s41591-021-01329-2*
 
+Please also cite the following pre-print if you use version 0.3.0 onwards:
+
+*Chenqu Suo, Krzysztof Polanski, Emma Dann, Rik G.H. Lindeboom, Roser Vilarrasa Blasi, Roser Vento-Tormo, Muzlifah Haniffa, Kerstin B Meyer, Zewen Kelvin Tuong, Menna R. Clatworthy, Sarah Teichmann.* ***Single cell antigen receptor analysis reveals lymphocyte developmental origins***. *bioRxiv 2022.11.18.517068; doi: https://doi.org/10.1101/2022.11.18.517068*
+
 ## Overview
 
 ![](docs/notebooks/img/dandelion_overview.png)
@@ -23,7 +27,7 @@ Illustration of the `Dandelion` class slots
 
 ![](docs/notebooks/img/dandelion_class2.png)
 
-Please refer to the [documentation](https://sc-dandelion.readthedocs.io/) or the notebooks [here](https://nbviewer.jupyter.org/github/zktuong/dandelion/tree/latest/docs/notebooks/):
+Please refer to the [documentation](https://sc-dandelion.readthedocs.io/).
 
 The raw files for the examples can be downloaded from 10X's Single Cell Immune Profiling datasets [website](https://support.10xgenomics.com/single-cell-vdj/datasets).
 
@@ -36,12 +40,17 @@ The raw files for the examples can be downloaded from 10X's Single Cell Immune P
 singularity pull library://kt16/default/sc-dandelion:latest
 singularity shell --writable-tmpfs -B $PWD sc-dandelion_latest.sif
 ```
-This will load up a conda-environment that has all the required dependencies installed.
+This will load up a container that has all the required dependencies installed.
+
 This can be used for the preprocessing steps by navigating to the data folder and use:
 ```bash
 singularity run -B $PWD sc-dandelion_latest.sif dandelion-preprocess
 ```
-Please refer to the [documentation](https://sc-dandelion.readthedocs.io/en/latest/notebooks/singularity_preprocessing.html) for more information.
+
+If you have multiple samples to process, it is reccomended to specify the `--meta` option with a `.csv` file detailing the samples:
+```bash
+singularity run -B $PWD sc-dandelion_latest.sif dandelion-preprocess --meta meta.csv
+```
 
 ### Python package
 

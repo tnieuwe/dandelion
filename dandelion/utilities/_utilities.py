@@ -3,6 +3,7 @@
 """utilities module."""
 import os
 import re
+import vaex
 import warnings
 
 import numpy as np
@@ -11,6 +12,7 @@ import pandas as pd
 from airr import RearrangementSchema
 from collections import defaultdict
 from subprocess import run
+from tqdm import tqdm
 from typing import Tuple, Dict, Union, Optional, TypeVar, List
 
 NetworkxGraph = TypeVar("networkx.classes.graph.Graph")
@@ -584,21 +586,22 @@ def load_data(obj: Optional[Union[pd.DataFrame, str]]) -> pd.DataFrame:
                 obj_ = pd.read_csv(obj, sep="\t")
             except FileNotFoundError as e:
                 print(e)
-        elif isinstance(obj, pd.DataFrame):
+        elif isinstance(obj, pd.DataFrame | vaex.dataframe.DataFrameLocal):
             obj_ = obj.copy()
         else:
             raise FileNotFoundError(
                 "Either input is not of <class 'pandas.core.frame.DataFrame'> or file does not exist."
             )
-
         if "sequence_id" in obj_.columns:
-            obj_.set_index("sequence_id", drop=False, inplace=True)
-            if "cell_id" not in obj_.columns:
-                obj_["cell_id"] = [
-                    c.split("_contig")[0] for c in obj_["sequence_id"]
-                ]
+            if isinstance(obj, pd.DataFrame):
+                obj_.set_index("sequence_id", drop=False, inplace=True)
         else:
             raise KeyError("'sequence_id' not found in columns of input")
+
+        if "cell_id" not in obj_.columns:
+            obj_["cell_id"] = [
+                c.split("_contig")[0] for c in obj_["sequence_id"]
+            ]
 
         if "umi_count" in obj_.columns:
             if "duplicate_count" not in obj_.columns:
@@ -920,16 +923,29 @@ def format_chain_status(locus_status):
     return chain_status
 
 
-def update_rearrangement_status(self):
+def update_rearrangement_status(self, verbose: bool = False):
     """Check rearrangement status."""
     if "v_call_genotyped" in self.data:
         vcall = "v_call_genotyped"
     else:
         vcall = "v_call"
     contig_status = []
-    for v, j, c in zip(
-        self.data[vcall], self.data["j_call"], self.data["c_call"]
+    if isinstance(self.data, pd.DataFrame):
+        vs, js, cs = self.data[vcall], self.data["j_call"], self.data["c_call"]
+    else:
+        vs, js, cs = (
+            self.data[vcall].values,
+            self.data["j_call"].values,
+            self.data["c_call"].values,
+        )
+    for v, j, c in tqdm(
+        zip(vs, js, cs),
+        desc="Updating rearrangement status",
+        disable=not verbose,
+        total=len(vs),
     ):
+        if isinstance(self.data, vaex.dataframe.DataFrameLocal):
+            v, j, c = v.as_py(), j.as_py(), c.as_py()
         if present(v):
             if present(j):
                 if present(c):
@@ -946,4 +962,8 @@ def update_rearrangement_status(self):
                 contig_status.append("unknown")
         else:
             contig_status.append("unknown")
+    if isinstance(self.data, vaex.dataframe.DataFrameLocal):
+        import pyarrow
+
+        contig_status = pyarrow.array(contig_status)
     self.data["rearrangement_status"] = contig_status

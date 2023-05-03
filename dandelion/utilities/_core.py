@@ -13,6 +13,7 @@ import _pickle as cPickle
 import networkx as nx
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from anndata._core.index import (
     _normalize_index,
@@ -128,11 +129,17 @@ class Dandelion:
                 .isin(self.data.columns)
                 .all()
             ):  # sort so that the productive contig with the largest umi is first
-                self.data.sort_values(
-                    by=["cell_id", "productive", "duplicate_count"],
-                    inplace=True,
-                    ascending=[True, False, False],
-                )
+                if isinstance(self.data, pd.DataFrame):
+                    self.data.sort_values(
+                        by=["cell_id", "productive", "duplicate_count"],
+                        inplace=True,
+                        ascending=[True, False, False],
+                    )
+                else:
+                    self.data = self.data.sort(
+                        by=["cell_id", "productive", "duplicate_count"],
+                        ascending=[True, False, False],
+                    )
             # self.data = sanitize_data(self.data) # this is too slow. and unnecessary at this point.
             self.n_contigs = self.data.shape[0]
             if metadata is None:
@@ -268,9 +275,8 @@ class Dandelion:
     def _set_dim_df(self, value: pd.DataFrame, attr: str):
         """dim df setter"""
         if value is not None:
-            if not isinstance(value, pd.DataFrame):
-                raise ValueError(f"Can only assign pd.DataFrame to {attr}.")
-            value_idx = self._prep_dim_index(value.index, attr)
+            if isinstance(value, pd.DataFrame):
+                self._prep_dim_index(value.index, attr)
             setattr(self, f"_{attr}", value)
 
     def _prep_dim_index(self, value, attr: str) -> pd.Index:
@@ -1033,12 +1039,16 @@ class Dandelion:
             cols.remove(c)
 
         if clonekey in self.data:
-            if not all(pd.isnull(self.data[clonekey])):
-                cols = [clonekey] + cols
+            if isinstance(self.data, pd.DataFrame):
+                if not all(pd.isnull(self.data[clonekey])):
+                    cols = [clonekey] + cols
+            else:
+                if self.data["clone_id"].isna().sum() < len(self.data):
+                    cols = [clonekey] + cols
 
         metadata_status = self.metadata
         if (metadata_status is None) or reinitialize:
-            initialize_metadata(self, cols, clonekey, collapse_alleles)
+            initialize_metadata(self, cols, clonekey, collapse_alleles, verbose)
 
         tmp_metadata = self.metadata.copy()
 
@@ -1075,10 +1085,10 @@ class Dandelion:
             retrieve_ = defaultdict(dict)
             for k, v in ret_dict.items():
                 if k in self.data.columns:
-                    if by_celltype:
-                        retrieve_[k] = querier.retrieve_celltype(**v)
-                    else:
-                        retrieve_[k] = querier.retrieve(**v)
+                    # if by_celltype:
+                    # retrieve_[k] = querier.retrieve_celltype(**v)
+                    # else:
+                    retrieve_[k] = querier.retrieve(**v)
                 else:
                     raise KeyError(
                         "Cannot retrieve '%s' : Unknown column name." % k
@@ -1472,13 +1482,16 @@ class Query:
 
     def __init__(self, data, verbose=False):
         self.data = data.copy()
-        self.Cell = Tree()
-        for contig, row in tqdm(
-            data.iterrows(),
-            desc="Setting up data",
-            disable=not verbose,
-        ):
-            self.Cell[row["cell_id"]][contig].update(row)
+        self.verbose = verbose
+        if isinstance(self.data, pd.DataFrame):
+            self.Cell = Tree()
+            for contig, row in tqdm(
+                self.data.iterrows(),
+                desc="Setting up data",
+                disable=not verbose,
+                total=len(self.data),
+            ):
+                self.Cell[row["cell_id"]][contig].update(row)
 
     @property
     def querydtype(self):
@@ -1489,132 +1502,329 @@ class Query:
         """Retrieve query."""
         self.query = query
         ret = {}
-        for cell in self.Cell:
-            cols, vdj, vj = {}, [], []
-            for _, contig in self.Cell[cell].items():
-                if isinstance(contig, dict):
-                    if contig["locus"] in ["IGH", "TRB", "TRD"]:
-                        vdj.append(contig[query])
-                    elif contig["locus"] in ["IGK", "IGL", "TRA", "TRG"]:
-                        vj.append(contig[query])
-            if retrieve_mode == "split and unique only":
-                if len(vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_VDJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(vdj))
-                                if present(x)
-                            )
-                        }
-                    )
-                if len(vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_VJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(vj))
-                                if present(x)
-                            )
-                        }
-                    )
-            elif retrieve_mode == "split and merge":
-                if len(vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_VDJ": "|".join(
-                                str(x) for x in vdj if present(x)
-                            )
-                        }
-                    )
-                if len(vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_VJ": "|".join(str(x) for x in vj if present(x))
-                        }
-                    )
-            elif retrieve_mode == "merge and unique only":
-                cols.update(
-                    {
-                        query: "|".join(
-                            str(x) for x in set(vdj + vj) if present(x)
+        if isinstance(self.data, vaex.dataframe.DataFrameLocal):
+            for cell in tqdm(
+                self.data["cell_id"].unique(),
+                disable=not self.verbose,
+                total=len(self.data["cell_id"].unique()),
+            ):
+                cols, vdj, vj = {}, [], []
+                Cell = self.data[self.data["cell_id"] == cell]
+                for seqid in Cell["sequence_id"].values:
+                    contig = Cell[Cell["sequence_id"] == seqid]
+                    if contig["locus"].isin(["IGH", "TRB", "TRD"]).values:
+                        vdj.append(
+                            contig[query].values[0].as_py()
+                        ) if isinstance(
+                            contig[query].values[0], pa.Scalar
+                        ) else vdj.append(
+                            contig[query].values[0]
                         )
-                    }
-                )
-            elif retrieve_mode == "split and sum":
-                if len(vdj) > 0:
+                    elif (
+                        contig["locus"]
+                        .isin(["IGK", "IGL", "TRA", "TRG"])
+                        .values
+                    ):
+                        vj.append(
+                            contig[query].values[0].as_py()
+                        ) if isinstance(
+                            contig[query].values[0], pa.Scalar
+                        ) else vj.append(
+                            contig[query].values[0]
+                        )
+                    if retrieve_mode == "split and unique only":
+                        if len(vdj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VDJ": "|".join(
+                                        list(
+                                            set(
+                                                [
+                                                    str(x)
+                                                    for x in vdj
+                                                    if present(x)
+                                                ]
+                                            )
+                                        )
+                                    )
+                                }
+                            )
+                        if len(vj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VJ": "|".join(
+                                        list(
+                                            set(
+                                                [
+                                                    str(x)
+                                                    for x in vj
+                                                    if present(x)
+                                                ]
+                                            )
+                                        )
+                                    )
+                                }
+                            )
+                    elif retrieve_mode == "split and merge":
+                        if len(vdj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VDJ": "|".join(
+                                        str(x) for x in vdj if present(x)
+                                    )
+                                }
+                            )
+                        if len(vj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VJ": "|".join(
+                                        str(x) for x in vj if present(x)
+                                    )
+                                }
+                            )
+                    elif retrieve_mode == "merge and unique only":
+                        cols.update(
+                            {
+                                query: "|".join(
+                                    list(
+                                        set(
+                                            [
+                                                str(x)
+                                                for x in set(vdj + vj)
+                                                if present(x)
+                                            ]
+                                        )
+                                    )
+                                )
+                            }
+                        )
+                    elif retrieve_mode == "merge":
+                        cols.update(
+                            {
+                                query: "|".join(
+                                    [str(x) for x in (vdj + vj) if present(x)]
+                                )
+                            }
+                        )
+                    elif retrieve_mode == "split":
+                        if len(vdj) > 0:
+                            for i in range(1, len(vdj) + 1):
+                                cols.update(
+                                    {query + "_VDJ_" + str(i): vdj[i - 1]}
+                                )
+                        if len(vj) > 0:
+                            for i in range(1, len(vj) + 1):
+                                cols.update(
+                                    {query + "_VJ_" + str(i): vj[i - 1]}
+                                )
+                    elif retrieve_mode == "split and sum":
+                        if len(vdj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VDJ": np.sum(
+                                        [float(x) for x in vdj if present(x)]
+                                    )
+                                }
+                            )
+                        else:
+                            cols.update({query + "_VDJ": np.nan})
+                        if len(vj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VJ": np.sum(
+                                        [float(x) for x in vj if present(x)]
+                                    )
+                                }
+                            )
+                        else:
+                            cols.update({query + "_VJ": np.nan})
+                    elif retrieve_mode == "split and average":
+                        if len(vdj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VDJ": np.mean(
+                                        [float(x) for x in vdj if present(x)]
+                                    )
+                                }
+                            )
+                        else:
+                            cols.update({query + "_VDJ": np.nan})
+                        if len(vj) > 0:
+                            cols.update(
+                                {
+                                    query
+                                    + "_VJ": np.mean(
+                                        [float(x) for x in vj if present(x)]
+                                    )
+                                }
+                            )
+                        else:
+                            cols.update({query + "_VJ": np.nan})
+                    elif retrieve_mode == "sum":
+                        cols.update(
+                            {
+                                query: np.sum(
+                                    [float(x) for x in (vdj + vj) if present(x)]
+                                )
+                            }
+                        )
+                        if not present(cols[query]):
+                            cols.update({query: np.nan})
+                    elif retrieve_mode == "average":
+                        cols.update(
+                            {
+                                query: np.mean(
+                                    [float(x) for x in (vdj + vj) if present(x)]
+                                )
+                            }
+                        )
+                        if not present(cols[query]):
+                            cols.update({query: np.nan})
+                    ret.update({cell: cols})
+        elif isinstance(self.data, pd.DataFrame):
+            for cell in self.Cell:
+                cols, vdj, vj = {}, [], []
+                for _, contig in self.Cell[cell].items():
+                    if isinstance(contig, dict):
+                        if contig["locus"] in ["IGH", "TRB", "TRD"]:
+                            vdj.append(contig[query])
+                        elif contig["locus"] in ["IGK", "IGL", "TRA", "TRG"]:
+                            vj.append(contig[query])
+                if retrieve_mode == "split and unique only":
+                    if len(vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VDJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(vdj))
+                                    if present(x)
+                                )
+                            }
+                        )
+                    if len(vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(vj))
+                                    if present(x)
+                                )
+                            }
+                        )
+                elif retrieve_mode == "split and merge":
+                    if len(vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VDJ": "|".join(
+                                    str(x) for x in vdj if present(x)
+                                )
+                            }
+                        )
+                    if len(vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VJ": "|".join(
+                                    str(x) for x in vj if present(x)
+                                )
+                            }
+                        )
+                elif retrieve_mode == "merge and unique only":
                     cols.update(
                         {
-                            query
-                            + "_VDJ": np.sum(
-                                [float(x) for x in vdj if present(x)]
+                            query: "|".join(
+                                str(x) for x in set(vdj + vj) if present(x)
                             )
                         }
                     )
-                else:
-                    cols.update({query + "_VDJ": np.nan})
-                if len(vj) > 0:
+                elif retrieve_mode == "split and sum":
+                    if len(vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VDJ": np.sum(
+                                    [float(x) for x in vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_VDJ": np.nan})
+                    if len(vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VJ": np.sum(
+                                    [float(x) for x in vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_VJ": np.nan})
+                elif retrieve_mode == "split and average":
+                    if len(vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VDJ": np.mean(
+                                    [float(x) for x in vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_VDJ": np.nan})
+                    if len(vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_VJ": np.mean(
+                                    [float(x) for x in vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_VJ": np.nan})
+                elif retrieve_mode == "merge":
+                    cols.update(
+                        {query: "|".join([x for x in (vdj + vj) if present(x)])}
+                    )
+                elif retrieve_mode == "split":
+                    if len(vdj) > 0:
+                        for i in range(1, len(vdj) + 1):
+                            cols.update({query + "_VDJ_" + str(i): vdj[i - 1]})
+                    if len(vj) > 0:
+                        for i in range(1, len(vj) + 1):
+                            cols.update({query + "_VJ_" + str(i): vj[i - 1]})
+                elif retrieve_mode == "sum":
                     cols.update(
                         {
-                            query
-                            + "_VJ": np.sum(
-                                [float(x) for x in vj if present(x)]
+                            query: np.sum(
+                                [float(x) for x in vdj + vj if present(x)]
                             )
                         }
                     )
-                else:
-                    cols.update({query + "_VJ": np.nan})
-            elif retrieve_mode == "split and average":
-                if len(vdj) > 0:
+                    if not present(cols[query]):
+                        cols.update({query: np.nan})
+                elif retrieve_mode == "average":
                     cols.update(
                         {
-                            query
-                            + "_VDJ": np.mean(
-                                [float(x) for x in vdj if present(x)]
+                            query: np.mean(
+                                [float(x) for x in vdj + vj if present(x)]
                             )
                         }
                     )
-                else:
-                    cols.update({query + "_VDJ": np.nan})
-                if len(vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_VJ": np.mean(
-                                [float(x) for x in vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_VJ": np.nan})
-            elif retrieve_mode == "merge":
-                cols.update(
-                    {query: "|".join(x for x in set(vdj + vj) if present(x))}
-                )
-            elif retrieve_mode == "split":
-                if len(vdj) > 0:
-                    for i in range(1, len(vdj) + 1):
-                        cols.update({query + "_VDJ_" + str(i): vdj[i - 1]})
-                if len(vj) > 0:
-                    for i in range(1, len(vj) + 1):
-                        cols.update({query + "_VJ_" + str(i): vj[i - 1]})
-            elif retrieve_mode == "sum":
-                cols.update(
-                    {query: np.sum([float(x) for x in vdj + vj if present(x)])}
-                )
-                if not present(cols[query]):
-                    cols.update({query: np.nan})
-            elif retrieve_mode == "average":
-                cols.update(
-                    {query: np.mean([float(x) for x in vdj + vj if present(x)])}
-                )
-                if not present(cols[query]):
-                    cols.update({query: np.nan})
-            ret.update({cell: cols})
+                    if not present(cols[query]):
+                        cols.update({query: np.nan})
+                ret.update({cell: cols})
         out = pd.DataFrame.from_dict(ret, orient="index")
         if retrieve_mode not in [
             "split and sum",
@@ -1630,421 +1840,430 @@ class Query:
                         out[x].fillna("None", inplace=True)
             else:
                 out.fillna("None", inplace=True)
-        return out
+            return out
 
     def retrieve_celltype(self, query, retrieve_mode):
         """Retrieve query."""
         self.query = query
         ret = {}
-        for cell in self.Cell:
-            cols, abt_vdj, gdt_vdj, b_vdj, abt_vj, gdt_vj, b_vj = (
-                {},
-                [],
-                [],
-                [],
-                [],
-                [],
-                [],
-            )
-            for _, contig in self.Cell[cell].items():
-                if isinstance(contig, dict):
-                    if contig["locus"] in ["IGH"]:
-                        b_vdj.append(contig[query])
-                    elif contig["locus"] in ["IGK", "IGL"]:
-                        b_vj.append(contig[query])
-                    elif contig["locus"] in ["TRB"]:
-                        abt_vdj.append(contig[query])
-                    elif contig["locus"] in ["TRD"]:
-                        gdt_vdj.append(contig[query])
-                    elif contig["locus"] in ["TRA"]:
-                        abt_vj.append(contig[query])
-                    elif contig["locus"] in ["TRG"]:
-                        gdt_vj.append(contig[query])
-            if retrieve_mode == "split and unique only":
-                if len(b_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VDJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(b_vdj))
-                                if present(x)
-                            )
-                        }
-                    )
-                if len(b_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(b_vj))
-                                if present(x)
-                            )
-                        }
-                    )
-
-                if len(abt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VDJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(abt_vdj))
-                                if present(x)
-                            )
-                        }
-                    )
-                if len(abt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(abt_vj))
-                                if present(x)
-                            )
-                        }
-                    )
-
-                if len(gdt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VDJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(gdt_vdj))
-                                if present(x)
-                            )
-                        }
-                    )
-                if len(gdt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VJ": "|".join(
-                                str(x)
-                                for x in list(dict.fromkeys(gdt_vj))
-                                if present(x)
-                            )
-                        }
-                    )
-            elif retrieve_mode == "split and merge":
-                if len(b_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VDJ": "|".join(
-                                str(x) for x in b_vdj if present(x)
-                            )
-                        }
-                    )
-                if len(b_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VJ": "|".join(
-                                str(x) for x in b_vj if present(x)
-                            )
-                        }
-                    )
-
-                if len(abt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VDJ": "|".join(
-                                str(x) for x in abt_vdj if present(x)
-                            )
-                        }
-                    )
-                if len(abt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VJ": "|".join(
-                                str(x) for x in abt_vj if present(x)
-                            )
-                        }
-                    )
-
-                if len(gdt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VDJ": "|".join(
-                                str(x) for x in gdt_vdj if present(x)
-                            )
-                        }
-                    )
-                if len(gdt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VJ": "|".join(
-                                str(x) for x in gdt_vj if present(x)
-                            )
-                        }
-                    )
-
-            elif retrieve_mode == "merge and unique only":
-                cols.update(
-                    {
-                        query: "|".join(
-                            str(x)
-                            for x in set(
-                                b_vdj
-                                + abt_vdj
-                                + gdt_vdj
-                                + b_vj
-                                + abt_vj
-                                + gdt_vj
-                            )
-                            if present(x)
-                        )
-                    }
+        if isinstance(self.data, pd.DataFrame):
+            for cell in self.Cell:
+                cols, abt_vdj, gdt_vdj, b_vdj, abt_vj, gdt_vj, b_vj = (
+                    {},
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
                 )
-            elif retrieve_mode == "split and sum":
-                if len(b_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VDJ": np.sum(
-                                [float(x) for x in b_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_B_VDJ": np.nan})
-                if len(b_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VJ": np.sum(
-                                [float(x) for x in b_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_B_VJ": np.nan})
-
-                if len(abt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VDJ": np.sum(
-                                [float(x) for x in abt_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_abT_VDJ": np.nan})
-                if len(abt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VJ": np.sum(
-                                [float(x) for x in abt_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_abT_VJ": np.nan})
-
-                if len(gdt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VDJ": np.sum(
-                                [float(x) for x in gdt_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_gdT_VDJ": np.nan})
-                if len(gdt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VJ": np.sum(
-                                [float(x) for x in gdt_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_gdT_VJ": np.nan})
-            elif retrieve_mode == "split and average":
-                if len(b_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VDJ": np.mean(
-                                [float(x) for x in b_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_B_VDJ": np.nan})
-                if len(b_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_B_VJ": np.mean(
-                                [float(x) for x in b_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_B_VJ": np.nan})
-
-                if len(abt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VDJ": np.mean(
-                                [float(x) for x in abt_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_abT_VDJ": np.nan})
-                if len(abt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_abT_VJ": np.mean(
-                                [float(x) for x in abt_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_abT_VJ": np.nan})
-
-                if len(gdt_vdj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VDJ": np.mean(
-                                [float(x) for x in gdt_vdj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_gdT_VDJ": np.nan})
-                if len(gdt_vj) > 0:
-                    cols.update(
-                        {
-                            query
-                            + "_gdT_VJ": np.mean(
-                                [float(x) for x in gdt_vj if present(x)]
-                            )
-                        }
-                    )
-                else:
-                    cols.update({query + "_gdT_VJ": np.nan})
-            elif retrieve_mode == "merge":
-                cols.update(
-                    {
-                        query: "|".join(
-                            x
-                            for x in set(
-                                b_vdj
-                                + abt_vdj
-                                + gdt_vdj
-                                + b_vj
-                                + abt_vj
-                                + gdt_vj
-                            )
-                            if present(x)
-                        )
-                    }
-                )
-            elif retrieve_mode == "split":
-                if len(b_vdj) > 0:
-                    for i in range(1, len(b_vdj) + 1):
-                        cols.update({query + "_B_VDJ_" + str(i): b_vdj[i - 1]})
-                if len(b_vj) > 0:
-                    for i in range(1, len(b_vj) + 1):
-                        cols.update({query + "_B_VJ_" + str(i): b_vj[i - 1]})
-                if len(abt_vdj) > 0:
-                    for i in range(1, len(abt_vdj) + 1):
+                for _, contig in self.Cell[cell].items():
+                    if isinstance(contig, dict):
+                        if contig["locus"] in ["IGH"]:
+                            b_vdj.append(contig[query])
+                        elif contig["locus"] in ["IGK", "IGL"]:
+                            b_vj.append(contig[query])
+                        elif contig["locus"] in ["TRB"]:
+                            abt_vdj.append(contig[query])
+                        elif contig["locus"] in ["TRD"]:
+                            gdt_vdj.append(contig[query])
+                        elif contig["locus"] in ["TRA"]:
+                            abt_vj.append(contig[query])
+                        elif contig["locus"] in ["TRG"]:
+                            gdt_vj.append(contig[query])
+                if retrieve_mode == "split and unique only":
+                    if len(b_vdj) > 0:
                         cols.update(
-                            {query + "_abT_VDJ_" + str(i): abt_vdj[i - 1]}
+                            {
+                                query
+                                + "_B_VDJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(b_vdj))
+                                    if present(x)
+                                )
+                            }
                         )
-                if len(abt_vj) > 0:
-                    for i in range(1, len(abt_vj) + 1):
+                    if len(b_vj) > 0:
                         cols.update(
-                            {query + "_abT_VJ_" + str(i): abt_vj[i - 1]}
+                            {
+                                query
+                                + "_B_VJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(b_vj))
+                                    if present(x)
+                                )
+                            }
                         )
-                if len(gdt_vdj) > 0:
-                    for i in range(1, len(gdt_vdj) + 1):
+
+                    if len(abt_vdj) > 0:
                         cols.update(
-                            {query + "_gdT_VDJ_" + str(i): gdt_vdj[i - 1]}
+                            {
+                                query
+                                + "_abT_VDJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(abt_vdj))
+                                    if present(x)
+                                )
+                            }
                         )
-                if len(gdt_vj) > 0:
-                    for i in range(1, len(gdt_vj) + 1):
+                    if len(abt_vj) > 0:
                         cols.update(
-                            {query + "_gdT_VJ_" + str(i): gdt_vj[i - 1]}
+                            {
+                                query
+                                + "_abT_VJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(abt_vj))
+                                    if present(x)
+                                )
+                            }
                         )
-            elif retrieve_mode == "sum":
-                cols.update(
-                    {
-                        query: np.sum(
-                            [
-                                float(x)
-                                for x in b_vdj
-                                + abt_vdj
-                                + gdt_vdj
-                                + b_vj
-                                + abt_vj
-                                + gdt_vj
+
+                    if len(gdt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VDJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(gdt_vdj))
+                                    if present(x)
+                                )
+                            }
+                        )
+                    if len(gdt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VJ": "|".join(
+                                    str(x)
+                                    for x in list(dict.fromkeys(gdt_vj))
+                                    if present(x)
+                                )
+                            }
+                        )
+                elif retrieve_mode == "split and merge":
+                    if len(b_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VDJ": "|".join(
+                                    str(x) for x in b_vdj if present(x)
+                                )
+                            }
+                        )
+                    if len(b_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VJ": "|".join(
+                                    str(x) for x in b_vj if present(x)
+                                )
+                            }
+                        )
+
+                    if len(abt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VDJ": "|".join(
+                                    str(x) for x in abt_vdj if present(x)
+                                )
+                            }
+                        )
+                    if len(abt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VJ": "|".join(
+                                    str(x) for x in abt_vj if present(x)
+                                )
+                            }
+                        )
+
+                    if len(gdt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VDJ": "|".join(
+                                    str(x) for x in gdt_vdj if present(x)
+                                )
+                            }
+                        )
+                    if len(gdt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VJ": "|".join(
+                                    str(x) for x in gdt_vj if present(x)
+                                )
+                            }
+                        )
+
+                elif retrieve_mode == "merge and unique only":
+                    cols.update(
+                        {
+                            query: "|".join(
+                                str(x)
+                                for x in set(
+                                    b_vdj
+                                    + abt_vdj
+                                    + gdt_vdj
+                                    + b_vj
+                                    + abt_vj
+                                    + gdt_vj
+                                )
                                 if present(x)
-                            ]
+                            )
+                        }
+                    )
+                elif retrieve_mode == "split and sum":
+                    if len(b_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VDJ": np.sum(
+                                    [float(x) for x in b_vdj if present(x)]
+                                )
+                            }
                         )
-                    }
-                )
-                if not present(cols[query]):
-                    cols.update({query: np.nan})
-            elif retrieve_mode == "average":
-                cols.update(
-                    {
-                        query: np.mean(
-                            [
-                                float(x)
-                                for x in b_vdj
-                                + abt_vdj
-                                + gdt_vdj
-                                + b_vj
-                                + abt_vj
-                                + gdt_vj
+                    else:
+                        cols.update({query + "_B_VDJ": np.nan})
+                    if len(b_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VJ": np.sum(
+                                    [float(x) for x in b_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_B_VJ": np.nan})
+
+                    if len(abt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VDJ": np.sum(
+                                    [float(x) for x in abt_vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_abT_VDJ": np.nan})
+                    if len(abt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VJ": np.sum(
+                                    [float(x) for x in abt_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_abT_VJ": np.nan})
+
+                    if len(gdt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VDJ": np.sum(
+                                    [float(x) for x in gdt_vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_gdT_VDJ": np.nan})
+                    if len(gdt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VJ": np.sum(
+                                    [float(x) for x in gdt_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_gdT_VJ": np.nan})
+                elif retrieve_mode == "split and average":
+                    if len(b_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VDJ": np.mean(
+                                    [float(x) for x in b_vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_B_VDJ": np.nan})
+                    if len(b_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_B_VJ": np.mean(
+                                    [float(x) for x in b_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_B_VJ": np.nan})
+
+                    if len(abt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VDJ": np.mean(
+                                    [float(x) for x in abt_vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_abT_VDJ": np.nan})
+                    if len(abt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_abT_VJ": np.mean(
+                                    [float(x) for x in abt_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_abT_VJ": np.nan})
+
+                    if len(gdt_vdj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VDJ": np.mean(
+                                    [float(x) for x in gdt_vdj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_gdT_VDJ": np.nan})
+                    if len(gdt_vj) > 0:
+                        cols.update(
+                            {
+                                query
+                                + "_gdT_VJ": np.mean(
+                                    [float(x) for x in gdt_vj if present(x)]
+                                )
+                            }
+                        )
+                    else:
+                        cols.update({query + "_gdT_VJ": np.nan})
+                elif retrieve_mode == "merge":
+                    cols.update(
+                        {
+                            query: "|".join(
+                                x
+                                for x in set(
+                                    b_vdj
+                                    + abt_vdj
+                                    + gdt_vdj
+                                    + b_vj
+                                    + abt_vj
+                                    + gdt_vj
+                                )
                                 if present(x)
-                            ]
-                        )
-                    }
-                )
-                if not present(cols[query]):
-                    cols.update({query: np.nan})
-            ret.update({cell: cols})
-        out = pd.DataFrame.from_dict(ret, orient="index")
-        if retrieve_mode not in [
-            "split and sum",
-            "split and average",
-            "sum",
-            "average",
-        ]:
-            if retrieve_mode == "split":
-                for x in out:
-                    try:
-                        out[x] = pd.to_numeric(out[x])
-                    except:
-                        out[x].fillna("None", inplace=True)
-            else:
-                out.fillna("None", inplace=True)
-        return out
+                            )
+                        }
+                    )
+                elif retrieve_mode == "split":
+                    if len(b_vdj) > 0:
+                        for i in range(1, len(b_vdj) + 1):
+                            cols.update(
+                                {query + "_B_VDJ_" + str(i): b_vdj[i - 1]}
+                            )
+                    if len(b_vj) > 0:
+                        for i in range(1, len(b_vj) + 1):
+                            cols.update(
+                                {query + "_B_VJ_" + str(i): b_vj[i - 1]}
+                            )
+                    if len(abt_vdj) > 0:
+                        for i in range(1, len(abt_vdj) + 1):
+                            cols.update(
+                                {query + "_abT_VDJ_" + str(i): abt_vdj[i - 1]}
+                            )
+                    if len(abt_vj) > 0:
+                        for i in range(1, len(abt_vj) + 1):
+                            cols.update(
+                                {query + "_abT_VJ_" + str(i): abt_vj[i - 1]}
+                            )
+                    if len(gdt_vdj) > 0:
+                        for i in range(1, len(gdt_vdj) + 1):
+                            cols.update(
+                                {query + "_gdT_VDJ_" + str(i): gdt_vdj[i - 1]}
+                            )
+                    if len(gdt_vj) > 0:
+                        for i in range(1, len(gdt_vj) + 1):
+                            cols.update(
+                                {query + "_gdT_VJ_" + str(i): gdt_vj[i - 1]}
+                            )
+                elif retrieve_mode == "sum":
+                    cols.update(
+                        {
+                            query: np.sum(
+                                [
+                                    float(x)
+                                    for x in b_vdj
+                                    + abt_vdj
+                                    + gdt_vdj
+                                    + b_vj
+                                    + abt_vj
+                                    + gdt_vj
+                                    if present(x)
+                                ]
+                            )
+                        }
+                    )
+                    if not present(cols[query]):
+                        cols.update({query: np.nan})
+                elif retrieve_mode == "average":
+                    cols.update(
+                        {
+                            query: np.mean(
+                                [
+                                    float(x)
+                                    for x in b_vdj
+                                    + abt_vdj
+                                    + gdt_vdj
+                                    + b_vj
+                                    + abt_vj
+                                    + gdt_vj
+                                    if present(x)
+                                ]
+                            )
+                        }
+                    )
+                    if not present(cols[query]):
+                        cols.update({query: np.nan})
+                ret.update({cell: cols})
+            out = pd.DataFrame.from_dict(ret, orient="index")
+            if retrieve_mode not in [
+                "split and sum",
+                "split and average",
+                "sum",
+                "average",
+            ]:
+                if retrieve_mode == "split":
+                    for x in out:
+                        try:
+                            out[x] = pd.to_numeric(out[x])
+                        except:
+                            out[x].fillna("None", inplace=True)
+                else:
+                    out.fillna("None", inplace=True)
+            return out
 
 
 def initialize_metadata(
-    vdj_data, cols: List[str], clonekey: str, collapse_alleles: bool
+    vdj_data,
+    cols: List[str],
+    clonekey: str,
+    collapse_alleles: bool,
+    verbose: bool,
 ):
     """Initialize Dandelion metadata."""
     init_dict = {}
@@ -2075,19 +2294,19 @@ def initialize_metadata(
                 }
             }
         )
-    update_rearrangement_status(vdj_data)
+    update_rearrangement_status(vdj_data, verbose=verbose)
 
     if "ambiguous" in vdj_data.data:
         dataq = vdj_data.data[vdj_data.data["ambiguous"] == "F"]
     else:
         dataq = vdj_data.data
     if vdj_data.querier is None:
-        querier = Query(dataq)
+        querier = Query(dataq, verbose=verbose)
         vdj_data.querier = querier
     else:
         if vdj_data.metadata is not None:
             if any(~vdj_data.metadata_names.isin(vdj_data.data.cell_id)):
-                querier = Query(dataq)
+                querier = Query(dataq, verbose=verbose)
                 vdj_data.querier = querier
             else:
                 querier = vdj_data.querier
@@ -2096,25 +2315,30 @@ def initialize_metadata(
 
     meta_ = defaultdict(dict)
     for k, v in init_dict.copy().items():
-        if all_missing(vdj_data.data[k]):
-            init_dict.pop(k)
-            continue
+        if isinstance(vdj_data.data, pd.DataFrame):
+            if all_missing(vdj_data.data[k]):
+                init_dict.pop(k)
+                continue
+        else:
+            if vdj_data.data[k].isna().sum() == len(vdj_data.data):
+                init_dict.pop(k)
+                continue
         meta_[k] = querier.retrieve(**v)
-        if k in [
-            "v_call",
-            "v_call_genotyped",
-            "d_call",
-            "j_call",
-            "c_call",
-            "productive",
-        ]:
-            meta_[k + "_split"] = querier.retrieve_celltype(**v)
-        if k in ["duplicate_count"]:
-            v.update({"retrieve_mode": "split and sum"})
-            meta_[k] = querier.retrieve_celltype(**v)
-        if k in ["mu_count", "mu_freq"]:
-            v.update({"retrieve_mode": "split and average"})
-            meta_[k] = querier.retrieve_celltype(**v)
+        # if k in [
+        #     "v_call",
+        #     "v_call_genotyped",
+        #     "d_call",
+        #     "j_call",
+        #     "c_call",
+        #     "productive",
+        # ]:
+        #     meta_[k + "_split"] = querier.retrieve_celltype(**v)
+        # if k in ["duplicate_count"]:
+        #     v.update({"retrieve_mode": "split and sum"})
+        #     meta_[k] = querier.retrieve_celltype(**v)
+        # if k in ["mu_count", "mu_freq"]:
+        #     v.update({"retrieve_mode": "split and average"})
+        #     meta_[k] = querier.retrieve_celltype(**v)
 
     tmp_metadata = pd.concat(meta_.values(), axis=1, join="inner")
 
@@ -2555,7 +2779,7 @@ def update_metadata(
 
     metadata_status = vdj_data.metadata
     if (metadata_status is None) or reinitialize:
-        initialize_metadata(vdj_data, cols, clonekey, collapse_alleles)
+        initialize_metadata(vdj_data, cols, clonekey, collapse_alleles, verbose)
 
     tmp_metadata = vdj_data.metadata.copy()
 
@@ -2564,11 +2788,11 @@ def update_metadata(
         if type(retrieve) is str:
             retrieve = [retrieve]
         if vdj_data.querier is None:
-            querier = Query(vdj_data.data)
+            querier = Query(vdj_data.data, verbose)
             vdj_data.querier = querier
         else:
             if any([r not in vdj_data.querier.data for r in retrieve]):
-                querier = Query(vdj_data.data)
+                querier = Query(vdj_data.data, verbose)
                 vdj_data.querier = querier
             else:
                 querier = vdj_data.querier
@@ -2592,10 +2816,10 @@ def update_metadata(
         retrieve_ = defaultdict(dict)
         for k, v in ret_dict.items():
             if k in vdj_data.data.columns:
-                if by_celltype:
-                    retrieve_[k] = querier.retrieve_celltype(**v)
-                else:
-                    retrieve_[k] = querier.retrieve(**v)
+                # if by_celltype:
+                #     retrieve_[k] = querier.retrieve_celltype(**v)
+                # else:
+                retrieve_[k] = querier.retrieve(**v)
             else:
                 raise KeyError(
                     "Cannot retrieve '%s' : Unknown column name." % k

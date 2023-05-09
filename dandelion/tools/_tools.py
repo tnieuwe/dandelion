@@ -634,7 +634,7 @@ def find_clones(
                 layout=layout_,
                 graph=graph_,
             )
-            vdj_data.update_metadata(reinitialize=True)
+            vdj_data.update_metadata(initialize=True)
         elif ("clone_id" in vdj_data.data.columns) and (key_added is not None):
             vdj_data.__init__(
                 data=dat_,
@@ -643,7 +643,7 @@ def find_clones(
                 graph=graph_,
             )
             vdj_data.update_metadata(
-                reinitialize=True,
+                initialize=True,
                 clone_key="clone_id",
                 retrieve=clone_key,
                 retrieve_mode="merge and unique only",
@@ -656,7 +656,7 @@ def find_clones(
                 graph=graph_,
                 clone_key=clone_key,
             )
-            vdj_data.update_metadata(reinitialize=True, clone_key=clone_key)
+            vdj_data.update_metadata(initialize=True, clone_key=clone_key)
         vdj_data.threshold = threshold_
 
     else:

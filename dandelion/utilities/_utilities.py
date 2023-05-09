@@ -1,20 +1,24 @@
 #!/usr/bin/env python
 # @Author: kt16
-"""utilities module."""
+import airr
 import os
 import re
 import warnings
 
+import awkward as ak
 import numpy as np
 import pandas as pd
 
 from airr import RearrangementSchema
 from collections import defaultdict
+from scirpy.io import AirrCell
+from scirpy.io._util import _read_airr_rearrangement_df, _IOLogger
 from subprocess import run
-from typing import Tuple, Dict, Union, Optional, TypeVar, List
+from typing import Tuple, Union, Optional, TypeVar, List
 
 NetworkxGraph = TypeVar("networkx.classes.graph.Graph")
 
+CELL_ATTRIBUTES = "is_cell"
 TRUES = ["T", "True", "true", "TRUE", True]
 FALSES = ["F", "False", "false", "FALSE", False]
 HEAVYLONG = ["IGH", "TRB", "TRD"]
@@ -347,6 +351,11 @@ def all_missing(x):
     return all(pd.isnull(x)) or all(x == "")
 
 
+def all_missing_nested(x):
+    """Utility function to check if all x is not null or blank in a nested list."""
+    return all([((pd.isnull(y)) or (y == "")) for y in flatten(x)])
+
+
 def all_missing2(x):
     """Utility function to check if all x is not null or blank or the word None."""
     return all(pd.isnull(x)) or all(x == "") or all(x == "None")
@@ -586,25 +595,27 @@ def load_data(obj: Optional[Union[pd.DataFrame, str]]) -> pd.DataFrame:
                 print(e)
         elif isinstance(obj, pd.DataFrame):
             obj_ = obj.copy()
+        elif isinstance(obj, ak.highlevel.Array):
+            obj_ = ak.copy(obj)
         else:
             raise FileNotFoundError(
-                "Either input is not of <class 'pandas.core.frame.DataFrame'> or file does not exist."
+                "Either input is not of :class:`~pandas.core.frame.DataFrame`, :class:`~awkward.highlevel.Array` or file does not exist."
             )
+        if isinstance(obj, pd.DataFrame):
+            col_fields = get_col_fields(obj_)
+            if "sequence_id" in col_fields:
+                obj_.set_index("sequence_id", drop=False, inplace=True)
+                if "cell_id" not in col_fields:
+                    obj_["cell_id"] = [
+                        c.split("_contig")[0] for c in obj_["sequence_id"]
+                    ]
+            else:
+                raise KeyError("'sequence_id' not found in columns of input")
 
-        if "sequence_id" in obj_.columns:
-            obj_.set_index("sequence_id", drop=False, inplace=True)
-            if "cell_id" not in obj_.columns:
-                obj_["cell_id"] = [
-                    c.split("_contig")[0] for c in obj_["sequence_id"]
-                ]
-        else:
-            raise KeyError("'sequence_id' not found in columns of input")
-
-        if "umi_count" in obj_.columns:
-            if "duplicate_count" not in obj_.columns:
-                obj_.rename(
-                    columns={"umi_count": "duplicate_count"}, inplace=True
-                )
+            if "umi_count" in col_fields:
+                if "duplicate_count" not in col_fields:
+                    obj_.rename(columns={"umi_count": "duplicate_count"}, inplace=True)
+            update_rearrangement_status(obj_)
 
         return obj_
 
@@ -861,6 +872,26 @@ def format_locus(
     return result
 
 
+def get_col_fields(data: Union[pd.DataFrame, ak.highlevel.Array]) -> List[str]:
+    """
+    Get column or field names from rearrangement data.
+
+    Parameters
+    ----------
+    data : Union[pd.DataFrame, ak.highlevel.Array]
+        input rearrangement data.
+
+    Returns
+    -------
+    List[str]
+        List of column/field names.
+    """
+    col_fields = (
+        data.fields if isinstance(data, ak.highlevel.Array) else data.columns
+    )
+    return col_fields
+
+
 def sum_col(vals):
     """Sum columns if not NaN."""
     if all(pd.isnull(vals)):
@@ -869,14 +900,29 @@ def sum_col(vals):
         return sum(vals)
 
 
-def lib_type(lib: str):
-    """Dictionary of acceptable loci for library type."""
-    librarydict = {
-        "tr-ab": ["TRA", "TRB"],
-        "tr-gd": ["TRG", "TRD"],
-        "ig": ["IGH", "IGK", "IGL"],
-    }
-    return librarydict[lib]
+def lib_type(lib: Optional[str]) -> List[str] | None:
+    """
+    Dictionary of acceptable loci for library type.
+
+    Parameters
+    ----------
+    lib : Optional[str]
+        library key.
+
+    Returns
+    -------
+    List[str] | None
+        List of acceptable loci or `None`.
+    """
+    if lib is not None:
+        librarydict = {
+            "tr-ab": ["TRA", "TRB"],
+            "tr-gd": ["TRG", "TRD"],
+            "ig": ["IGH", "IGK", "IGL"],
+        }
+        return librarydict[lib]
+    else:
+        return None
 
 
 def movecol(
@@ -920,30 +966,163 @@ def format_chain_status(locus_status):
     return chain_status
 
 
-def update_rearrangement_status(self):
+def update_rearrangement_status(data: pd.DataFrame):
     """Check rearrangement status."""
-    if "v_call_genotyped" in self.data:
-        vcall = "v_call_genotyped"
-    else:
-        vcall = "v_call"
-    contig_status = []
-    for v, j, c in zip(
-        self.data[vcall], self.data["j_call"], self.data["c_call"]
-    ):
-        if present(v):
-            if present(j):
-                if present(c):
-                    if len(list(set([v[:3], j[:3], c[:3]]))) > 1:
-                        contig_status.append("chimeric")
+    col_fields = get_col_fields(data)
+    if "rearrangement_status" not in col_fields:
+        vcall = (
+            "v_call_genotyped" if "v_call_genotyped" in col_fields else "v_call"
+        )
+        contig_status = []
+        for v, j, c in zip(
+            data[vcall],
+            data["j_call"],
+            data["c_call"],
+        ):
+            if present(v):
+                if present(j):
+                    if present(c):
+                        if len(list(set([v[:3], j[:3], c[:3]]))) > 1:
+                            contig_status.append("chimeric")
+                        else:
+                            contig_status.append("standard")
                     else:
-                        contig_status.append("standard")
+                        if len(list(set([v[:3], j[:3]]))) > 1:
+                            contig_status.append("chimeric")
+                        else:
+                            contig_status.append("standard")
                 else:
-                    if len(list(set([v[:3], j[:3]]))) > 1:
-                        contig_status.append("chimeric")
-                    else:
-                        contig_status.append("standard")
+                    contig_status.append("unknown")
             else:
                 contig_status.append("unknown")
+        data["rearrangement_status"] = contig_status
+
+def filter_by_loci(
+    data: pd.DataFrame, loci: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """
+    Filter rearrangement data based on loci.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        rearrangement dataframe
+    loci : Optional[List[str]], optional
+        List of acceptable loci, by default None
+
+    Returns
+    -------
+    pd.DataFrame
+        filtered data that only contains acceptable loci.
+    """
+    if loci is not None:
+        data = data[data.locus.isin(loci)].copy()
+    return data
+
+
+def filter_by_ambiguous(
+    data: Union[pd.DataFrame, ak.highlevel.Array],
+) -> Union[pd.DataFrame, ak.highlevel.Array]:
+    """
+    Filter rearrangement data if ambiguous.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        rearrangement data
+
+    Returns
+    -------
+    Union[pd.DataFrame, ak.highlevel.Array]
+        filtered data that only contains unambiguous rearrangements.
+    """
+    if isinstance(data, pd.DataFrame):
+        if "ambiguous" in data:
+            dataq = data[data["ambiguous"] == "F"]
         else:
-            contig_status.append("unknown")
-    self.data["rearrangement_status"] = contig_status
+            dataq = data
+    else:
+        if "ambiguous" in data.fields:
+            dataq = data[data["ambiguous"] == "F"]
+        else:
+            dataq = data
+    return dataq
+
+
+def sort_by_umi_count(data: pd.DataFrame):
+    """
+    Sort the rearrangement dataframe based on duplicate count column, in place.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        rearrangement dataframe.
+    """
+    if (
+        pd.Series(["cell_id", "duplicate_count", "productive"])
+        .isin(data.columns)
+        .all()
+    ):  # sort so that the productive contig with the largest umi is first
+        data.sort_values(
+            by=["cell_id", "productive", "duplicate_count"],
+            inplace=True,
+            ascending=[True, False, False],
+        )
+
+
+def scverse_airr_io(
+    obj: Union[pd.DataFrame, str],
+    library_type: Optional[Literal["tr-ab", "tr-gd", "ig"]] = None,
+) -> ak.highlevel.Array:
+    """
+    Loader that uses scverse' AIRR data structure #261.
+
+    Based on :class:`~scirpy.io.read_airr` function.
+
+    Parameters
+    ----------
+    obj : Union[pd.DataFrame, str]
+        file path to .tsv file or pandas DataFrame object.
+    library_type : Optional[Literal["tr-ab", "tr-gd", "ig"]], optional
+            One of "tr-ab", "tr-gd", "ig".
+
+    Returns
+    -------
+    ak.highlevel.Array
+        Awkward array containing :class:`~scirpy.io.AirrCell` objects.
+    """
+    airr_cells = {}
+    logger = _IOLogger()
+    df = load_data(obj)
+    df = filter_by_loci(data=df, loci=lib_type(library_type))
+
+    try:
+        df = check_travdv(df)
+    except:
+        pass
+    sort_by_umi_count(df)
+
+    iterator = _read_airr_rearrangement_df(df)
+    
+    for count, chain_dict in enumerate(iterator, start=1):
+        chain_dict = dict(chain_dict)
+        cell_id = chain_dict["cell_id"]
+        chain_dict.update(
+            {
+                req: None
+                for req in RearrangementSchema.required
+                if req not in chain_dict
+            }
+        )
+        try:
+            tmp_cell = airr_cells[cell_id]
+        except KeyError:
+            tmp_cell = AirrCell(
+                cell_id=cell_id,
+                logger=logger,
+                cell_attribute_fields=CELL_ATTRIBUTES,
+            )
+            airr_cells[cell_id] = tmp_cell
+        tmp_cell.add_chain(chain_dict)
+    ak_airr_cells = ak.Array((c.chains for c in airr_cells.values()))
+    return ak_airr_cells, count, airr_cells.keys()

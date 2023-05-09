@@ -73,6 +73,7 @@ class Dandelion:
         graph: Optional[Tuple[NetworkxGraph, NetworkxGraph]] = None,
         initialize: bool = True,
         library_type: Optional[Literal["tr-ab", "tr-gd", "ig"]] = None,
+        scverse_airr: bool = True,
         **kwargs,
     ):
         """Init method for Dandelion.
@@ -93,6 +94,8 @@ class Dandelion:
             whether or not to initialize `.metadata` slot.
         library_type : Optional[Literal["tr-ab", "tr-gd", "ig"]], optional
             One of "tr-ab", "tr-gd", "ig".
+        scverse_airr : bool, optional
+            whether to use scverse-airr io to load object.
         **kwargs
             passed to `Dandelion.update_metadata`.
         """
@@ -111,37 +114,30 @@ class Dandelion:
             self.germline.update(germline)
 
         if self.data is not None:
-            if self.library_type is not None:
-                acceptable = lib_type(self.library_type)
+            if scverse_airr:
+                self.data, self.n_contigs, self.index = scverse_airr_io(data)
             else:
-                acceptable = None
-
-            if acceptable is not None:
-                self.data = self.data[self.data.locus.isin(acceptable)].copy()
-
-            try:
-                self.data = check_travdv(self.data)
-            except:
-                pass
-            if (
-                pd.Series(["cell_id", "duplicate_count", "productive"])
-                .isin(self.data.columns)
-                .all()
-            ):  # sort so that the productive contig with the largest umi is first
-                self.data.sort_values(
-                    by=["cell_id", "productive", "duplicate_count"],
-                    inplace=True,
-                    ascending=[True, False, False],
+                self.data = filter_by_loci(
+                    data=self.data, loci=lib_type(self.library_type)
                 )
-            # self.data = sanitize_data(self.data) # this is too slow. and unnecessary at this point.
-            self.n_contigs = self.data.shape[0]
-            if metadata is None:
-                if initialize is True:
-                    self.update_metadata(**kwargs)
                 try:
-                    self.n_obs = self.metadata.shape[0]
+                    self.data = check_travdv(self.data)
                 except:
-                    self.n_obs = 0
+                    pass
+                sort_by_umi_count(self.data)
+                self.index = self.data.index
+                self.n_contigs = len(self.index)
+            if metadata is None:
+                if scverse_airr:
+                    initialize = False
+                    self.n_obs = len(self.data)
+                else:
+                    if initialize is True:
+                        self.update_metadata(**kwargs)
+                    try:
+                        self.n_obs = self.metadata.shape[0]
+                    except:
+                        self.n_obs = 0
             else:
                 self.metadata = metadata
                 self.n_obs = self.metadata.shape[0]
@@ -155,9 +151,12 @@ class Dandelion:
         descr = f"Dandelion class object with n_obs = {n_obs} and n_contigs = {n_contigs}"
         for attr in ["data", "metadata"]:
             try:
-                keys = getattr(self, attr).keys()
-            except:
-                keys = []
+                keys = getattr(self, attr).fields
+            except AttributeError:
+                try:
+                    keys = getattr(self, attr).keys()
+                except AttributeError:
+                    keys = []
             if len(keys) > 0:
                 descr += f"\n    {attr}: {str(list(keys))[1:-1]}"
         if self.layout is not None:
@@ -217,7 +216,7 @@ class Dandelion:
             layout=_layout,
             graph=_graph,
         )
-
+        
     @property
     def data(self) -> pd.DataFrame:
         """One-dimensional annotation of contig observations (`pd.DataFrame`)."""
@@ -232,7 +231,10 @@ class Dandelion:
     @property
     def data_names(self) -> pd.Index:
         """Names of observations (alias for `.data.index`)."""
-        return self.data.index
+        if isinstance(self.data, pd.DataFrame):
+            return self.data.index
+        elif isinstance(self.data, ak.highlevel.Array):
+            return self.index
 
     @data_names.setter
     def data_names(self, names: List[str]):
@@ -265,12 +267,13 @@ class Dandelion:
         """retrieve indices"""
         return _normalize_indices(index, self.metadata_names, self.data_names)
 
-    def _set_dim_df(self, value: pd.DataFrame, attr: str):
+    def _set_dim_df(self, value: Union[pd.DataFrame, ak.highlevel.Array], attr: str):
         """dim df setter"""
         if value is not None:
-            if not isinstance(value, pd.DataFrame):
-                raise ValueError(f"Can only assign pd.DataFrame to {attr}.")
-            value_idx = self._prep_dim_index(value.index, attr)
+            if not isinstance(value, pd.DataFrame | ak.highlevel.Array):
+                raise ValueError(f"Can only assign :class:`~pandas.DataFrame` or :class:`~awkward.highlevel.Array` to {attr}.")
+            if isinstance(value, pd.DataFrame):
+                value_idx = self._prep_dim_index(value.index, attr)
             setattr(self, f"_{attr}", value)
 
     def _prep_dim_index(self, value, attr: str) -> pd.Index:
@@ -933,8 +936,7 @@ class Dandelion:
             "average",
         ] = "split and merge",
         collapse_alleles: bool = True,
-        reinitialize: bool = True,
-        verbose: bool = False,
+        initialize: bool = False,
         by_celltype: bool = False,
     ):
         """
@@ -972,11 +974,9 @@ class Dandelion:
                     returns the retrieval averaged into one column for all contigs.
         collapse_alleles : bool, optional
             returns the V(D)J genes with allelic calls if False.
-        reinitialize : bool, optional
-            whether or not to reinitialize the current metadata.
+        initialize : bool, optional
+            whether or not to initialize the current metadata.
             useful when updating older versions of `dandelion` to newer version.
-        verbose : bool, optional
-            whether to print progress.
         by_celltype : bool, optional
             whether to return the query/update by celltype.
 
@@ -1006,25 +1006,13 @@ class Dandelion:
             "junction",
             "junction_aa",
         ]
+        col_fields = get_col_fields(self.data)
+        cols = ["sample_id"] + cols if "sample_id" in col_fields else cols
 
-        if "duplicate_count" not in self.data:
-            raise ValueError(
-                "Unable to initialize metadata due to missing keys. "
-                "Please ensure either 'umi_count' or 'duplicate_count' is in the input data."
-            )
-
-        if not all([c in self.data for c in cols]):
-            raise ValueError(
-                "Unable to initialize metadata due to missing keys. "
-                "Please ensure the input data contains all the following columns: {}".format(
-                    cols
-                )
-            )
-
-        if "sample_id" in self.data:
+        if "sample_id" in col_fields:
             cols = ["sample_id"] + cols
 
-        if "v_call_genotyped" in self.data:
+        if "v_call_genotyped" in col_fields:
             cols = list(
                 map(lambda x: "v_call_genotyped" if x == "v_call" else x, cols)
             )
@@ -1032,30 +1020,25 @@ class Dandelion:
         for c in ["sequence_id", "cell_id"]:
             cols.remove(c)
 
-        if clonekey in self.data:
-            if not all(pd.isnull(self.data[clonekey])):
-                cols = [clonekey] + cols
+        if clonekey in col_fields:
+            if isinstance(self.data, ak.highlevel.Array):
+                if not all_missing_nested(self.data[clonekey]):
+                    cols = [clonekey] + cols
+            else:
+                if not all_missing(self.data[clonekey]):
+                    cols = [clonekey] + cols
 
         metadata_status = self.metadata
-        if (metadata_status is None) or reinitialize:
+        if initialize == False:
+            if metadata_status is None:
+                self.metadata = pd.DataFrame()
+        elif (metadata_status is None) or initialize:
             initialize_metadata(self, cols, clonekey, collapse_alleles)
-
         tmp_metadata = self.metadata.copy()
-
         if retrieve is not None:
             ret_dict = {}
             if type(retrieve) is str:
                 retrieve = [retrieve]
-            if self.querier is None:
-                querier = Query(self.data)
-                self.querier = querier
-            else:
-                if any([r not in self.querier.data for r in retrieve]):
-                    querier = Query(self.data)
-                    self.querier = querier
-                else:
-                    querier = self.querier
-
             if type(retrieve_mode) is str:
                 retrieve_mode = [retrieve_mode]
                 if len(retrieve) > len(retrieve_mode):
@@ -1069,20 +1052,41 @@ class Dandelion:
                         }
                     }
                 )
-
             vdj_gene_ret = ["v_call", "d_call", "j_call"]
-
             retrieve_ = defaultdict(dict)
-            for k, v in ret_dict.items():
-                if k in self.data.columns:
-                    if by_celltype:
-                        retrieve_[k] = querier.retrieve_celltype(**v)
-                    else:
-                        retrieve_[k] = querier.retrieve(**v)
+            
+            if not isinstance(self.data, ak.highlevel.Array):
+                if self.querier is None:
+                    querier = Query(self.data)
+                    self.querier = querier
                 else:
-                    raise KeyError(
-                        "Cannot retrieve '%s' : Unknown column name." % k
-                    )
+                    if any([r not in self.querier.data for r in retrieve]):
+                        querier = Query(self.data)
+                        self.querier = querier
+                    else:
+                        querier = self.querier
+                for k, v in ret_dict.items():
+                    if k in self.data.columns:
+                        if by_celltype:
+                            retrieve_[k] = querier.retrieve_celltype(**v)
+                        else:
+                            retrieve_[k] = querier.retrieve(**v)
+                    else:
+                        raise KeyError(
+                            "Cannot retrieve '%s' : Unknown column name." % k
+                        )
+            else:
+                for k, v in ret_dict.items():
+                    if k in col_fields:
+                        if by_celltype:
+                            retrieve_[k] = retrieve_celltype_ak(self.data, **v)
+                        else:
+                            retrieve_[k] = retrieve_ak(self.data, **v)
+                    else:
+                        raise KeyError(
+                            "Cannot retrieve '%s' : Unknown field name." % k
+                        )
+                        
             ret_metadata = pd.concat(retrieve_.values(), axis=1, join="inner")
             ret_metadata.dropna(axis=1, how="all", inplace=True)
             for col in ret_metadata:
@@ -2047,6 +2051,7 @@ def initialize_metadata(
     vdj_data, cols: List[str], clonekey: str, collapse_alleles: bool
 ):
     """Initialize Dandelion metadata."""
+    col_fields = get_col_fields(vdj_data.data)
     init_dict = {}
     for col in cols:
         init_dict.update(
@@ -2075,54 +2080,70 @@ def initialize_metadata(
                 }
             }
         )
-    update_rearrangement_status(vdj_data)
-
-    if "ambiguous" in vdj_data.data:
-        dataq = vdj_data.data[vdj_data.data["ambiguous"] == "F"]
-    else:
-        dataq = vdj_data.data
-    if vdj_data.querier is None:
-        querier = Query(dataq)
-        vdj_data.querier = querier
-    else:
-        if vdj_data.metadata is not None:
-            if any(~vdj_data.metadata_names.isin(vdj_data.data.cell_id)):
-                querier = Query(dataq)
-                vdj_data.querier = querier
+    dataq = filter_by_ambiguous(vdj_data.data)
+    meta_ = defaultdict(dict)
+    if isinstance(dataq, pd.DataFrame):
+        if vdj_data.querier is None:
+            querier = Query(dataq)
+            vdj_data.querier = querier
+        else:
+            if vdj_data.metadata is not None:
+                if any(~vdj_data.metadata_names.isin(vdj_data.data.cell_id)):
+                    querier = Query(dataq)
+                    vdj_data.querier = querier
+                else:
+                    querier = vdj_data.querier
             else:
                 querier = vdj_data.querier
-        else:
-            querier = vdj_data.querier
-
-    meta_ = defaultdict(dict)
-    for k, v in init_dict.copy().items():
-        if all_missing(vdj_data.data[k]):
-            init_dict.pop(k)
-            continue
-        meta_[k] = querier.retrieve(**v)
-        if k in [
-            "v_call",
-            "v_call_genotyped",
-            "d_call",
-            "j_call",
-            "c_call",
-            "productive",
-        ]:
-            meta_[k + "_split"] = querier.retrieve_celltype(**v)
-        if k in ["duplicate_count"]:
-            v.update({"retrieve_mode": "split and sum"})
-            meta_[k] = querier.retrieve_celltype(**v)
-        if k in ["mu_count", "mu_freq"]:
-            v.update({"retrieve_mode": "split and average"})
-            meta_[k] = querier.retrieve_celltype(**v)
-
+        for k, v in init_dict.copy().items():
+            if all_missing(vdj_data.data[k]):
+                init_dict.pop(k)
+                continue
+            meta_[k] = querier.retrieve(**v)
+            if k in [
+                "v_call",
+                "v_call_genotyped",
+                "d_call",
+                "j_call",
+                "c_call",
+                "productive",
+            ]:
+                meta_[k + "_split"] = querier.retrieve_celltype(**v)
+            if k in ["duplicate_count"]:
+                v.update({"retrieve_mode": "split and sum"})
+                meta_[k] = querier.retrieve_celltype(**v)
+            if k in ["mu_count", "mu_freq"]:
+                v.update({"retrieve_mode": "split and average"})
+                meta_[k] = querier.retrieve_celltype(**v)
+    else:
+         for k, v in init_dict.copy().items():
+            if all_missing_nested(vdj_data.data[k]):
+                init_dict.pop(k)
+                continue
+            meta_[k] = retrieve_ak(vdj_data.data, **v)
+            if k in [
+                "v_call",
+                "v_call_genotyped",
+                "d_call",
+                "j_call",
+                "c_call",
+                "productive",
+            ]:
+                meta_[k + "_split"] = retrieve_celltype_ak(vdj_data.data, **v)
+            if k in ["duplicate_count"]:
+                v.update({"retrieve_mode": "split and sum"})
+                meta_[k] = retrieve_celltype_ak(vdj_data.data, **v)
+            if k in ["mu_count", "mu_freq"]:
+                v.update({"retrieve_mode": "split and average"})
+                meta_[k] = retrieve_celltype_ak(vdj_data.data, **v)
+        
     tmp_metadata = pd.concat(meta_.values(), axis=1, join="inner")
 
     reqcols1 = [
         "locus_VDJ",
     ]
     vcall = (
-        "v_call_genotyped" if "v_call_genotyped" in vdj_data.data else "v_call"
+        "v_call_genotyped" if "v_call_genotyped" in col_fields else "v_call"
     )
     reqcols2 = [
         "locus_VJ",
@@ -2351,7 +2372,7 @@ def initialize_metadata(
     vdj_gene_calls = ["v_call", "d_call", "j_call"]
     if collapse_alleles:
         for x in vdj_gene_calls:
-            if x in vdj_data.data:
+            if x in col_fields:
                 for c in tmp_metadata:
                     if x in c:
                         tmp_metadata[c] = [
@@ -2394,9 +2415,14 @@ def initialize_metadata(
         if all_missing2(tmp_metadata[tmpm]):
             tmp_metadata.drop(tmpm, axis=1, inplace=True)
 
-    tmpxregstat = querier.retrieve(
-        query="rearrangement_status", retrieve_mode="split and unique only"
-    )
+    if isinstance(vdj_data.data, pd.DataFrame):
+        tmpxregstat = querier.retrieve(
+            query="rearrangement_status", retrieve_mode="split and unique only"
+        )
+    else:
+        tmpxregstat = retrieve_ak(vdj_data.data,
+            query="rearrangement_status", retrieve_mode="split and unique only"
+        )
 
     for x in tmpxregstat:
         tmpxregstat[x] = [
@@ -2423,11 +2449,18 @@ def initialize_metadata(
     )
     # if metadata already exist, just overwrite the default columns?
     if vdj_data.metadata is not None:
-        if any(~vdj_data.metadata_names.isin(vdj_data.data.cell_id)):
-            vdj_data.metadata = tmp_metadata.copy()  # reindex and replace.
-        else:
-            for col in tmp_metadata:
-                vdj_data.metadata[col] = pd.Series(tmp_metadata[col])
+        if isinstance(vdj_data.data, pd.DataFrame):
+            if any(~vdj_data.metadata_names.isin(vdj_data.data.cell_id)):
+                vdj_data.metadata = tmp_metadata.copy()  # reindex and replace.
+            else:
+                for col in tmp_metadata:
+                    vdj_data.metadata[col] = pd.Series(tmp_metadata[col])
+        elif isinstance(vdj_data.data, ak.highlevel.Array):
+            if any(~vdj_data.metadata_names.isin(flatten(vdj_data.data["cell_id"]))):
+                vdj_data.metadata = tmp_metadata.copy()  # reindex and replace.
+            else:
+                for col in tmp_metadata:
+                    vdj_data.metadata[col] = pd.Series(tmp_metadata[col])
     else:
         vdj_data.metadata = tmp_metadata.copy()
 
@@ -2448,8 +2481,7 @@ def update_metadata(
         "average",
     ] = "split and merge",
     collapse_alleles: bool = True,
-    reinitialize: bool = True,
-    verbose: bool = False,
+    initialize: bool = True,
     by_celltype: bool = False,
 ):
     """
@@ -2489,11 +2521,9 @@ def update_metadata(
                 returns the retrieval averaged into one column for all contigs.
     collapse_alleles : bool, optional
         returns the V(D)J genes with allelic calls if False.
-    reinitialize : bool, optional
-        whether or not to reinitialize the current metadata.
+    initialize : bool, optional
+        whether or not to initialize the current metadata.
         useful when updating older versions of `dandelion` to newer version.
-    verbose : bool, optional
-        whether to print progress.
     by_celltype : bool, optional
         whether to return the query/update by celltype.
 
@@ -2524,24 +2554,10 @@ def update_metadata(
         "junction_aa",
     ]
 
-    if "duplicate_count" not in vdj_data.data:
-        raise ValueError(
-            "Unable to initialize metadata due to missing keys. "
-            "Please ensure either 'umi_count' or 'duplicate_count' is in the input data."
-        )
+    col_fields = get_col_fields(vdj_data.data)
+    cols = ["sample_id"] + cols if "sample_id" in col_fields else cols
 
-    if not all([c in vdj_data.data for c in cols]):
-        raise ValueError(
-            "Unable to initialize metadata due to missing keys. "
-            "Please ensure the input data contains all the following columns: {}".format(
-                cols
-            )
-        )
-
-    if "sample_id" in vdj_data.data:
-        cols = ["sample_id"] + cols
-
-    if "v_call_genotyped" in vdj_data.data:
+    if "v_call_genotyped" in col_fields:
         cols = list(
             map(lambda x: "v_call_genotyped" if x == "v_call" else x, cols)
         )
@@ -2549,12 +2565,19 @@ def update_metadata(
     for c in ["sequence_id", "cell_id"]:
         cols.remove(c)
 
-    if clonekey in vdj_data.data:
-        if not all(pd.isnull(vdj_data.data[clonekey])):
-            cols = [clonekey] + cols
+    if clonekey in col_fields:
+        if isinstance(vdj_data, ak.highlevel.Array):
+            if not all_missing_nested(vdj_data.data[clonekey]):
+                cols = [clonekey] + cols
+        else:
+            if not all_missing(vdj_data.data[clonekey]):
+                cols = [clonekey] + cols
 
     metadata_status = vdj_data.metadata
-    if (metadata_status is None) or reinitialize:
+    if initialize == False:
+        if metadata_status is None:
+            vdj_data.metadata = pd.DataFrame()
+    if (metadata_status is None) or initialize:
         initialize_metadata(vdj_data, cols, clonekey, collapse_alleles)
 
     tmp_metadata = vdj_data.metadata.copy()
@@ -2563,16 +2586,6 @@ def update_metadata(
         ret_dict = {}
         if type(retrieve) is str:
             retrieve = [retrieve]
-        if vdj_data.querier is None:
-            querier = Query(vdj_data.data)
-            vdj_data.querier = querier
-        else:
-            if any([r not in vdj_data.querier.data for r in retrieve]):
-                querier = Query(vdj_data.data)
-                vdj_data.querier = querier
-            else:
-                querier = vdj_data.querier
-
         if type(retrieve_mode) is str:
             retrieve_mode = [retrieve_mode]
             if len(retrieve) > len(retrieve_mode):
@@ -2586,20 +2599,40 @@ def update_metadata(
                     }
                 }
             )
-
         vdj_gene_ret = ["v_call", "d_call", "j_call"]
 
         retrieve_ = defaultdict(dict)
-        for k, v in ret_dict.items():
-            if k in vdj_data.data.columns:
-                if by_celltype:
-                    retrieve_[k] = querier.retrieve_celltype(**v)
-                else:
-                    retrieve_[k] = querier.retrieve(**v)
+        if not isinstance(vdj_data.data, ak.highlevel.Array):
+            if vdj_data.querier is None:
+                querier = Query(vdj_data.data)
+                vdj_data.querier = querier
             else:
-                raise KeyError(
-                    "Cannot retrieve '%s' : Unknown column name." % k
-                )
+                if any([r not in vdj_data.querier.data for r in retrieve]):
+                    querier = Query(vdj_data.data)
+                    vdj_data.querier = querier
+                else:
+                    querier = vdj_data.querier
+            for k, v in ret_dict.items():
+                if k in col_fields:
+                    if by_celltype:
+                        retrieve_[k] = querier.retrieve_celltype(**v)
+                    else:
+                        retrieve_[k] = querier.retrieve(**v)
+                else:
+                    raise KeyError(
+                        "Cannot retrieve '%s' : Unknown column name." % k
+                    )
+        else:
+            for k, v in ret_dict.items():
+                if k in col_fields:
+                    if by_celltype:
+                        retrieve_[k] = retrieve_celltype_ak(vdj_data.data, **v)
+                    else:
+                        retrieve_[k] = retrieve_ak(vdj_data.data, **v)
+                else:
+                    raise KeyError(
+                        "Cannot retrieve '%s' : Unknown field name." % k
+                    )
         ret_metadata = pd.concat(retrieve_.values(), axis=1, join="inner")
         ret_metadata.dropna(axis=1, how="all", inplace=True)
         for col in ret_metadata:
@@ -2669,3 +2702,513 @@ def _normalize_indices(
 def return_none_call(call: str) -> str:
     """Return None if not present."""
     return call.split("|")[0] if not call in ["None", ""] else "None"
+
+def retrieve_ak(
+    cells: ak.highlevel.Array,
+    query: str,
+    retrieve_mode: Literal[
+        "split and unique only",
+        "merge and unique only",
+        "split and merge",
+        "split and sum",
+        "split and average",
+        "split",
+        "merge",
+        "sum",
+        "average",
+    ],
+) -> pd.DataFrame:
+    """
+    Retrieve query from :class:`~scirpy.io.AirrCell` in :class:`~awkward.highlevel.Array`.
+
+    Parameters
+    ----------
+    cells : ak.highlevel.Array
+        :class:`~awkward.highlevel.Array` containing :class:`~scirpy.io.AirrCell`.
+    query : str, optional
+        rearrangement field name in AIRR contig.
+    retrieve_mode : Literal["split and unique only", "merge and unique only", "split and merge", "split and sum", "split and average", "split", "merge", "sum", "average", ], optional
+        one of:
+            `split and unique only`
+                returns the retrieval splitted into two columns,
+                i.e. one for VDJ and one for VJ chains, separated by `|` for unique elements.
+            `merge and unique only`
+                returns the retrieval merged into one column,
+                separated by `|` for unique elements.
+            `split and merge`
+                returns the retrieval splitted into two columns,
+                i.e. one for VDJ and one for VJ chains, separated by `|` for every elements.
+            `split`
+                returns the retrieval splitted into separate columns for each contig.
+            `merge`
+                returns the retrieval merged into one columns for each contig,
+                separated by `|` for unique elements.
+            `split and sum`
+                returns the retrieval sumed in the VDJ and VJ columns (separately).
+            `split and average`
+                returns the retrieval averaged in the VDJ and VJ columns (separately).
+            `sum`
+                returns the retrieval sumed into one column for all contigs.
+            `average`
+                returns the retrieval averaged into one column for all contigs.
+
+    Returns
+    -------
+    pd.DataFrame
+        retrieved cell-level queries.
+    """
+    ret = {}
+    for cell in cells:
+        cell_id = "".join(list(set(cell["cell_id"])))
+        cols, vdj, vj = {}, [], []
+        for contig in cell:
+            if contig["locus"] in ["IGH", "TRB", "TRD"]:
+                vdj.append(contig[query])
+            elif contig["locus"] in ["IGK", "IGL", "TRA", "TRG"]:
+                vj.append(contig[query])
+        if retrieve_mode == "split and unique only":
+            if len(vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_VDJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(vdj)) if present(x)
+                        )
+                    }
+                )
+            if len(vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_VJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(vj)) if present(x)
+                        )
+                    }
+                )
+        elif retrieve_mode == "split and merge":
+            if len(vdj) > 0:
+                cols.update(
+                    {query + "_VDJ": "|".join(str(x) for x in vdj if present(x))}
+                )
+            if len(vj) > 0:
+                cols.update({query + "_VJ": "|".join(str(x) for x in vj if present(x))})
+        elif retrieve_mode == "merge and unique only":
+            cols.update({query: "|".join(str(x) for x in set(vdj + vj) if present(x))})
+        elif retrieve_mode == "split and sum":
+            if len(vdj) > 0:
+                cols.update(
+                    {query + "_VDJ": np.sum([float(x) for x in vdj if present(x)])}
+                )
+            else:
+                cols.update({query + "_VDJ": np.nan})
+            if len(vj) > 0:
+                cols.update(
+                    {query + "_VJ": np.sum([float(x) for x in vj if present(x)])}
+                )
+            else:
+                cols.update({query + "_VJ": np.nan})
+        elif retrieve_mode == "split and average":
+            if len(vdj) > 0:
+                cols.update(
+                    {query + "_VDJ": np.mean([float(x) for x in vdj if present(x)])}
+                )
+            else:
+                cols.update({query + "_VDJ": np.nan})
+            if len(vj) > 0:
+                cols.update(
+                    {query + "_VJ": np.mean([float(x) for x in vj if present(x)])}
+                )
+            else:
+                cols.update({query + "_VJ": np.nan})
+        elif retrieve_mode == "merge":
+            cols.update({query: "|".join(x for x in (vdj + vj) if present(x))})
+        elif retrieve_mode == "split":
+            if len(vdj) > 0:
+                for i in range(1, len(vdj) + 1):
+                    cols.update({query + "_VDJ_" + str(i): vdj[i - 1]})
+            if len(vj) > 0:
+                for i in range(1, len(vj) + 1):
+                    cols.update({query + "_VJ_" + str(i): vj[i - 1]})
+        elif retrieve_mode == "sum":
+            cols.update({query: np.sum([float(x) for x in vdj + vj if present(x)])})
+            if not present(cols[query]):
+                cols.update({query: np.nan})
+        elif retrieve_mode == "average":
+            cols.update({query: np.mean([float(x) for x in vdj + vj if present(x)])})
+            if not present(cols[query]):
+                cols.update({query: np.nan})
+        ret.update({cell_id: cols})
+    out = pd.DataFrame.from_dict(ret, orient="index")
+    if retrieve_mode not in [
+        "split and sum",
+        "split and average",
+        "sum",
+        "average",
+    ]:
+        if retrieve_mode == "split":
+            for x in out:
+                try:
+                    out[x] = pd.to_numeric(out[x])
+                except:
+                    out[x].fillna("None", inplace=True)
+        else:
+            out.fillna("None", inplace=True)
+    return out
+
+
+def retrieve_celltype_ak(
+    cells: ak.highlevel.Array,
+    query: str,
+    retrieve_mode: Literal[
+        "split and unique only",
+        "merge and unique only",
+        "split and merge",
+        "split and sum",
+        "split and average",
+        "split",
+        "merge",
+        "sum",
+        "average",
+    ],
+) -> pd.DataFrame:
+    """
+    Retrieve query by celltype from :class:`~scirpy.io.AirrCell` in :class:`~awkward.highlevel.Array`.
+
+    Parameters
+    ----------
+    cells : ak.highlevel.Array
+        :class:`~awkward.highlevel.Array` containing :class:`~scirpy.io.AirrCell`.
+    query : str, optional
+        rearrangement field name in AIRR contig.
+    retrieve_mode : Literal["split and unique only", "merge and unique only", "split and merge", "split and sum", "split and average", "split", "merge", "sum", "average", ], optional
+        one of:
+            `split and unique only`
+                returns the retrieval splitted into two columns,
+                i.e. one for VDJ and one for VJ chains, separated by `|` for unique elements.
+            `merge and unique only`
+                returns the retrieval merged into one column,
+                separated by `|` for unique elements.
+            `split and merge`
+                returns the retrieval splitted into two columns,
+                i.e. one for VDJ and one for VJ chains, separated by `|` for every elements.
+            `split`
+                returns the retrieval splitted into separate columns for each contig.
+            `merge`
+                returns the retrieval merged into one columns for each contig,
+                separated by `|` for unique elements.
+            `split and sum`
+                returns the retrieval sumed in the VDJ and VJ columns (separately).
+            `split and average`
+                returns the retrieval averaged in the VDJ and VJ columns (separately).
+            `sum`
+                returns the retrieval sumed into one column for all contigs.
+            `average`
+                returns the retrieval averaged into one column for all contigs.
+
+    Returns
+    -------
+    pd.DataFrame
+        retrieved cell-level queries by celltype.
+    """
+    ret = {}
+    for cell in cells:
+        cell_id = "".join(list(set(cell["cell_id"])))
+        cols, abt_vdj, gdt_vdj, b_vdj, abt_vj, gdt_vj, b_vj = (
+            {},
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        for contig in cell:
+            if contig["locus"] in ["IGH"]:
+                b_vdj.append(contig[query])
+            elif contig["locus"] in ["IGK", "IGL"]:
+                b_vj.append(contig[query])
+            elif contig["locus"] in ["TRB"]:
+                abt_vdj.append(contig[query])
+            elif contig["locus"] in ["TRD"]:
+                gdt_vdj.append(contig[query])
+            elif contig["locus"] in ["TRA"]:
+                abt_vj.append(contig[query])
+            elif contig["locus"] in ["TRG"]:
+                gdt_vj.append(contig[query])
+        if retrieve_mode == "split and unique only":
+            if len(b_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_B_VDJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(b_vdj)) if present(x)
+                        )
+                    }
+                )
+            if len(b_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_B_VJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(b_vj)) if present(x)
+                        )
+                    }
+                )
+
+            if len(abt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VDJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(abt_vdj)) if present(x)
+                        )
+                    }
+                )
+            if len(abt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(abt_vj)) if present(x)
+                        )
+                    }
+                )
+
+            if len(gdt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VDJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(gdt_vdj)) if present(x)
+                        )
+                    }
+                )
+            if len(gdt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VJ": "|".join(
+                            str(x) for x in list(dict.fromkeys(gdt_vj)) if present(x)
+                        )
+                    }
+                )
+        elif retrieve_mode == "split and merge":
+            if len(b_vdj) > 0:
+                cols.update(
+                    {query + "_B_VDJ": "|".join(str(x) for x in b_vdj if present(x))}
+                )
+            if len(b_vj) > 0:
+                cols.update(
+                    {query + "_B_VJ": "|".join(str(x) for x in b_vj if present(x))}
+                )
+
+            if len(abt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VDJ": "|".join(str(x) for x in abt_vdj if present(x))
+                    }
+                )
+            if len(abt_vj) > 0:
+                cols.update(
+                    {query + "_abT_VJ": "|".join(str(x) for x in abt_vj if present(x))}
+                )
+
+            if len(gdt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VDJ": "|".join(str(x) for x in gdt_vdj if present(x))
+                    }
+                )
+            if len(gdt_vj) > 0:
+                cols.update(
+                    {query + "_gdT_VJ": "|".join(str(x) for x in gdt_vj if present(x))}
+                )
+
+        elif retrieve_mode == "merge and unique only":
+            cols.update(
+                {
+                    query: "|".join(
+                        str(x)
+                        for x in set(b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj)
+                        if present(x)
+                    )
+                }
+            )
+        elif retrieve_mode == "split and sum":
+            if len(b_vdj) > 0:
+                cols.update(
+                    {query + "_B_VDJ": np.sum([float(x) for x in b_vdj if present(x)])}
+                )
+            else:
+                cols.update({query + "_B_VDJ": np.nan})
+            if len(b_vj) > 0:
+                cols.update(
+                    {query + "_B_VJ": np.sum([float(x) for x in b_vj if present(x)])}
+                )
+            else:
+                cols.update({query + "_B_VJ": np.nan})
+
+            if len(abt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VDJ": np.sum([float(x) for x in abt_vdj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_abT_VDJ": np.nan})
+            if len(abt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VJ": np.sum([float(x) for x in abt_vj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_abT_VJ": np.nan})
+
+            if len(gdt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VDJ": np.sum([float(x) for x in gdt_vdj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_gdT_VDJ": np.nan})
+            if len(gdt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VJ": np.sum([float(x) for x in gdt_vj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_gdT_VJ": np.nan})
+        elif retrieve_mode == "split and average":
+            if len(b_vdj) > 0:
+                cols.update(
+                    {query + "_B_VDJ": np.mean([float(x) for x in b_vdj if present(x)])}
+                )
+            else:
+                cols.update({query + "_B_VDJ": np.nan})
+            if len(b_vj) > 0:
+                cols.update(
+                    {query + "_B_VJ": np.mean([float(x) for x in b_vj if present(x)])}
+                )
+            else:
+                cols.update({query + "_B_VJ": np.nan})
+
+            if len(abt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VDJ": np.mean([float(x) for x in abt_vdj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_abT_VDJ": np.nan})
+            if len(abt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_abT_VJ": np.mean([float(x) for x in abt_vj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_abT_VJ": np.nan})
+
+            if len(gdt_vdj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VDJ": np.mean([float(x) for x in gdt_vdj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_gdT_VDJ": np.nan})
+            if len(gdt_vj) > 0:
+                cols.update(
+                    {
+                        query
+                        + "_gdT_VJ": np.mean([float(x) for x in gdt_vj if present(x)])
+                    }
+                )
+            else:
+                cols.update({query + "_gdT_VJ": np.nan})
+        elif retrieve_mode == "merge":
+            cols.update(
+                {
+                    query: "|".join(
+                        x
+                        for x in (b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj)
+                        if present(x)
+                    )
+                }
+            )
+        elif retrieve_mode == "split":
+            if len(b_vdj) > 0:
+                for i in range(1, len(b_vdj) + 1):
+                    cols.update({query + "_B_VDJ_" + str(i): b_vdj[i - 1]})
+            if len(b_vj) > 0:
+                for i in range(1, len(b_vj) + 1):
+                    cols.update({query + "_B_VJ_" + str(i): b_vj[i - 1]})
+            if len(abt_vdj) > 0:
+                for i in range(1, len(abt_vdj) + 1):
+                    cols.update({query + "_abT_VDJ_" + str(i): abt_vdj[i - 1]})
+            if len(abt_vj) > 0:
+                for i in range(1, len(abt_vj) + 1):
+                    cols.update({query + "_abT_VJ_" + str(i): abt_vj[i - 1]})
+            if len(gdt_vdj) > 0:
+                for i in range(1, len(gdt_vdj) + 1):
+                    cols.update({query + "_gdT_VDJ_" + str(i): gdt_vdj[i - 1]})
+            if len(gdt_vj) > 0:
+                for i in range(1, len(gdt_vj) + 1):
+                    cols.update({query + "_gdT_VJ_" + str(i): gdt_vj[i - 1]})
+        elif retrieve_mode == "sum":
+            cols.update(
+                {
+                    query: np.sum(
+                        [
+                            float(x)
+                            for x in b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                            if present(x)
+                        ]
+                    )
+                }
+            )
+            if not present(cols[query]):
+                cols.update({query: np.nan})
+        elif retrieve_mode == "average":
+            cols.update(
+                {
+                    query: np.mean(
+                        [
+                            float(x)
+                            for x in b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                            if present(x)
+                        ]
+                    )
+                }
+            )
+            if not present(cols[query]):
+                cols.update({query: np.nan})
+        ret.update({cell_id: cols})
+    out = pd.DataFrame.from_dict(ret, orient="index")
+    if retrieve_mode not in [
+        "split and sum",
+        "split and average",
+        "sum",
+        "average",
+    ]:
+        if retrieve_mode == "split":
+            for x in out:
+                try:
+                    out[x] = pd.to_numeric(out[x])
+                except:
+                    out[x].fillna("None", inplace=True)
+        else:
+            out.fillna("None", inplace=True)
+    return out

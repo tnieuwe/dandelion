@@ -233,8 +233,6 @@ class Dandelion:
         """Names of observations (alias for `.data.index`)."""
         if isinstance(self.data, pd.DataFrame):
             return self.data.index
-        elif isinstance(self.data, ak.highlevel.Array):
-            return self.index
 
     @data_names.setter
     def data_names(self, names: List[str]):

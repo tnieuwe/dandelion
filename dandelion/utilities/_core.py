@@ -269,7 +269,7 @@ class Dandelion:
         """dim df setter"""
         if value is not None:
             if not isinstance(value, pd.DataFrame | ak.highlevel.Array):
-                raise ValueError(f"Can only assign :class:`~pandas.DataFrame` or :class:`~awkward.highlevel.Array` to {attr}.")
+                raise ValueError(f"Can only assign :class:`~pandas.core.frame.DataFrame` or :class:`~awkward.highlevel.Array` to {attr}.")
             if isinstance(value, pd.DataFrame):
                 value_idx = self._prep_dim_index(value.index, attr)
             setattr(self, f"_{attr}", value)
@@ -1160,7 +1160,7 @@ class Dandelion:
         filename : str, optional
             path to `.tsv` file.
         **kwargs
-            passed to `pandas.DataFrame.to_csv`.
+            passed to :func:`~pandas.core.frame.DataFrame.to_csv`.
         """
         data = sanitize_data(self.data)
         data.to_csv(filename, sep="\t", index=False, **kwargs)
@@ -1215,7 +1215,7 @@ class Dandelion:
         compression_level : Optional[int], optional
             Specifies a compression level for data. A value of 0 disables compression.
         **kwargs
-            passed to `pd.DataFrame.to_hdf`.
+            passed to :func:`~pandas.core.frame.DataFrame.to_hdf`.
 
         Raises
         ------
@@ -1363,7 +1363,7 @@ class Dandelion:
         compression_level : Optional[int], optional
             Specifies a compression level for data. A value of 0 disables compression.
         **kwargs
-            passed to `pd.DataFrame.to_hdf`.
+            passed to :func:`~pandas.core.frame.DataFrame.to_hdf`.
 
         Raises
         ------

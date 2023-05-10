@@ -1077,7 +1077,7 @@ def scverse_airr_io(
     """
     Loader that uses scverse' AIRR data structure #261.
 
-    Based on :class:`~scirpy.io.read_airr` function.
+    Based on :func:`~scirpy.io.read_airr` function.
 
     Parameters
     ----------

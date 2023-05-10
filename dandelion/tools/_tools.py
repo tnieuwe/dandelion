@@ -1614,7 +1614,7 @@ def clone_overlap(
     Returns
     -------
     Union[AnnData, pd.DataFrame]
-        Either `AnnData` or a `pandas.DataFrame`.
+        Either :class:`~anndata._core.anndata.AnnData` or a :class:`~pandas.core.frame.DataFrame`.
 
     Raises
     ------

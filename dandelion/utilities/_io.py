@@ -418,17 +418,17 @@ def to_scirpy(data: Dandelion, transfer: bool = False, **kwargs) -> AnnData:
     Parameters
     ----------
     data : Dandelion
-        `Dandelion` object
+        input :class:`~dandelion.utilities._core.Dandelion`.
     transfer : bool
-        Whether to execute :func:`dandelion.tl.transfer` to transfer all data
-        to the :class:`anndata.AnnData` instance.
+        whether to execute :func:`dandelion.tl.transfer` to transfer all data
+        to the :class:`~anndata._core.anndata.AnnData` instance.
     **kwargs
-        Additional arguments passed to :func:`scirpy.io.read_airr`.
+        additional arguments passed to :func:`scirpy.io.read_airr`.
 
     Returns
     -------
     AnnData
-        `AnnData` object in the format initialized by `scirpy`.
+        initialised `anndata._core.anndata.AnnData` object for `scirpy`.
 
     """
     try:

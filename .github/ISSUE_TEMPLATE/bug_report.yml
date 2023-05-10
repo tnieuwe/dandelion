@@ -36,7 +36,7 @@ body:
             self.data = load_data(data)
           File "/Users/kt16/Documents/Github/dandelion/dandelion/utilities/_utilities.py", line 564, in load_data
             raise FileNotFoundError(
-        FileNotFoundError: Either input is not of <class 'pandas.core.frame.DataFrame'> or file does not exist.
+        FileNotFoundError: Either input is not of :class:`~pandas.core.frame.DataFrame`, :class:`~awkward.highlevel.Array` or file does not exist.
    
   - type: textarea
     id: os

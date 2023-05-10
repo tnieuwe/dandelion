@@ -920,7 +920,7 @@ def clone_overlap(
                 "`clone_overlap` not found in `adata.uns`. Did you run `tl.clone_overlap`?"
             )
     else:
-        raise ValueError("Please provide a AnnData object.")
+        raise ValueError("Please provide a :class:`~anndata._core.anndata.AnnData` object.")
 
     edges = {}
     if not weighted_overlap:

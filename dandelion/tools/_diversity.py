@@ -488,7 +488,7 @@ def diversity_gini(
     ) -> pd.DataFrame:
         """Gini indices."""
         if isinstance(self, AnnData):
-            raise TypeError("Only Dandelion class object accepted.")
+            raise TypeError("Only :class:`~dandelion.utilities._core.Dandelion` class object accepted.")
         elif isinstance(self, Dandelion):
             metadata = self.metadata.copy()
         if clone_key is None:

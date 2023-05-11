@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # @Author: Kelvin
-"""core module."""
 import bz2
 import copy
 import gzip
@@ -115,7 +114,9 @@ class Dandelion:
 
         if self.data is not None:
             if scverse_airr:
-                self.data, self.n_contigs, self.index = scverse_airr_io(data)
+                self.data, self.n_contigs = scverse_airr_io(
+                    self.data, self.library_type
+                )
             else:
                 self.data = filter_by_loci(
                     data=self.data, loci=lib_type(self.library_type)
@@ -125,8 +126,7 @@ class Dandelion:
                 except:
                     pass
                 sort_by_umi_count(self.data)
-                self.index = self.data.index
-                self.n_contigs = len(self.index)
+                self.n_contigs = len(self.data.index)
             if metadata is None:
                 if scverse_airr:
                     initialize = False
@@ -216,7 +216,7 @@ class Dandelion:
             layout=_layout,
             graph=_graph,
         )
-        
+
     @property
     def data(self) -> pd.DataFrame:
         """One-dimensional annotation of contig observations (`pd.DataFrame`)."""
@@ -265,11 +265,15 @@ class Dandelion:
         """retrieve indices"""
         return _normalize_indices(index, self.metadata_names, self.data_names)
 
-    def _set_dim_df(self, value: Union[pd.DataFrame, ak.highlevel.Array], attr: str):
+    def _set_dim_df(
+        self, value: Union[pd.DataFrame, ak.highlevel.Array], attr: str
+    ):
         """dim df setter"""
         if value is not None:
             if not isinstance(value, pd.DataFrame | ak.highlevel.Array):
-                raise ValueError(f"Can only assign :class:`~pandas.core.frame.DataFrame` or :class:`~awkward.highlevel.Array` to {attr}.")
+                raise ValueError(
+                    f"Can only assign :class:`~pandas.core.frame.DataFrame` or :class:`~awkward.highlevel.Array` to {attr}."
+                )
             if isinstance(value, pd.DataFrame):
                 value_idx = self._prep_dim_index(value.index, attr)
             setattr(self, f"_{attr}", value)
@@ -1052,7 +1056,7 @@ class Dandelion:
                 )
             vdj_gene_ret = ["v_call", "d_call", "j_call"]
             retrieve_ = defaultdict(dict)
-            
+
             if not isinstance(self.data, ak.highlevel.Array):
                 if self.querier is None:
                     querier = Query(self.data)
@@ -1084,7 +1088,7 @@ class Dandelion:
                         raise KeyError(
                             "Cannot retrieve '%s' : Unknown field name." % k
                         )
-                        
+
             ret_metadata = pd.concat(retrieve_.values(), axis=1, join="inner")
             ret_metadata.dropna(axis=1, how="all", inplace=True)
             for col in ret_metadata:
@@ -2114,7 +2118,7 @@ def initialize_metadata(
                 v.update({"retrieve_mode": "split and average"})
                 meta_[k] = querier.retrieve_celltype(**v)
     else:
-         for k, v in init_dict.copy().items():
+        for k, v in init_dict.copy().items():
             if all_missing_nested(vdj_data.data[k]):
                 init_dict.pop(k)
                 continue
@@ -2134,15 +2138,13 @@ def initialize_metadata(
             if k in ["mu_count", "mu_freq"]:
                 v.update({"retrieve_mode": "split and average"})
                 meta_[k] = retrieve_celltype_ak(vdj_data.data, **v)
-        
+
     tmp_metadata = pd.concat(meta_.values(), axis=1, join="inner")
 
     reqcols1 = [
         "locus_VDJ",
     ]
-    vcall = (
-        "v_call_genotyped" if "v_call_genotyped" in col_fields else "v_call"
-    )
+    vcall = "v_call_genotyped" if "v_call_genotyped" in col_fields else "v_call"
     reqcols2 = [
         "locus_VJ",
         "productive_VDJ",
@@ -2418,8 +2420,10 @@ def initialize_metadata(
             query="rearrangement_status", retrieve_mode="split and unique only"
         )
     else:
-        tmpxregstat = retrieve_ak(vdj_data.data,
-            query="rearrangement_status", retrieve_mode="split and unique only"
+        tmpxregstat = retrieve_ak(
+            vdj_data.data,
+            query="rearrangement_status",
+            retrieve_mode="split and unique only",
         )
 
     for x in tmpxregstat:
@@ -2454,7 +2458,9 @@ def initialize_metadata(
                 for col in tmp_metadata:
                     vdj_data.metadata[col] = pd.Series(tmp_metadata[col])
         elif isinstance(vdj_data.data, ak.highlevel.Array):
-            if any(~vdj_data.metadata_names.isin(flatten(vdj_data.data["cell_id"]))):
+            if any(
+                ~vdj_data.metadata_names.isin(flatten(vdj_data.data["cell_id"]))
+            ):
                 vdj_data.metadata = tmp_metadata.copy()  # reindex and replace.
             else:
                 for col in tmp_metadata:
@@ -2701,6 +2707,7 @@ def return_none_call(call: str) -> str:
     """Return None if not present."""
     return call.split("|")[0] if not call in ["None", ""] else "None"
 
+
 def retrieve_ak(
     cells: ak.highlevel.Array,
     query: str,
@@ -2770,7 +2777,9 @@ def retrieve_ak(
                     {
                         query
                         + "_VDJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(vdj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(vdj))
+                            if present(x)
                         )
                     }
                 )
@@ -2779,42 +2788,63 @@ def retrieve_ak(
                     {
                         query
                         + "_VJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(vj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(vj))
+                            if present(x)
                         )
                     }
                 )
         elif retrieve_mode == "split and merge":
             if len(vdj) > 0:
                 cols.update(
-                    {query + "_VDJ": "|".join(str(x) for x in vdj if present(x))}
+                    {
+                        query
+                        + "_VDJ": "|".join(str(x) for x in vdj if present(x))
+                    }
                 )
             if len(vj) > 0:
-                cols.update({query + "_VJ": "|".join(str(x) for x in vj if present(x))})
+                cols.update(
+                    {query + "_VJ": "|".join(str(x) for x in vj if present(x))}
+                )
         elif retrieve_mode == "merge and unique only":
-            cols.update({query: "|".join(str(x) for x in set(vdj + vj) if present(x))})
+            cols.update(
+                {query: "|".join(str(x) for x in set(vdj + vj) if present(x))}
+            )
         elif retrieve_mode == "split and sum":
             if len(vdj) > 0:
                 cols.update(
-                    {query + "_VDJ": np.sum([float(x) for x in vdj if present(x)])}
+                    {
+                        query
+                        + "_VDJ": np.sum([float(x) for x in vdj if present(x)])
+                    }
                 )
             else:
                 cols.update({query + "_VDJ": np.nan})
             if len(vj) > 0:
                 cols.update(
-                    {query + "_VJ": np.sum([float(x) for x in vj if present(x)])}
+                    {
+                        query
+                        + "_VJ": np.sum([float(x) for x in vj if present(x)])
+                    }
                 )
             else:
                 cols.update({query + "_VJ": np.nan})
         elif retrieve_mode == "split and average":
             if len(vdj) > 0:
                 cols.update(
-                    {query + "_VDJ": np.mean([float(x) for x in vdj if present(x)])}
+                    {
+                        query
+                        + "_VDJ": np.mean([float(x) for x in vdj if present(x)])
+                    }
                 )
             else:
                 cols.update({query + "_VDJ": np.nan})
             if len(vj) > 0:
                 cols.update(
-                    {query + "_VJ": np.mean([float(x) for x in vj if present(x)])}
+                    {
+                        query
+                        + "_VJ": np.mean([float(x) for x in vj if present(x)])
+                    }
                 )
             else:
                 cols.update({query + "_VJ": np.nan})
@@ -2828,11 +2858,15 @@ def retrieve_ak(
                 for i in range(1, len(vj) + 1):
                     cols.update({query + "_VJ_" + str(i): vj[i - 1]})
         elif retrieve_mode == "sum":
-            cols.update({query: np.sum([float(x) for x in vdj + vj if present(x)])})
+            cols.update(
+                {query: np.sum([float(x) for x in vdj + vj if present(x)])}
+            )
             if not present(cols[query]):
                 cols.update({query: np.nan})
         elif retrieve_mode == "average":
-            cols.update({query: np.mean([float(x) for x in vdj + vj if present(x)])})
+            cols.update(
+                {query: np.mean([float(x) for x in vdj + vj if present(x)])}
+            )
             if not present(cols[query]):
                 cols.update({query: np.nan})
         ret.update({cell_id: cols})
@@ -2939,7 +2973,9 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_B_VDJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(b_vdj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(b_vdj))
+                            if present(x)
                         )
                     }
                 )
@@ -2948,7 +2984,9 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_B_VJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(b_vj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(b_vj))
+                            if present(x)
                         )
                     }
                 )
@@ -2958,7 +2996,9 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_abT_VDJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(abt_vdj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(abt_vdj))
+                            if present(x)
                         )
                     }
                 )
@@ -2967,7 +3007,9 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_abT_VJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(abt_vj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(abt_vj))
+                            if present(x)
                         )
                     }
                 )
@@ -2977,7 +3019,9 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_gdT_VDJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(gdt_vdj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(gdt_vdj))
+                            if present(x)
                         )
                     }
                 )
@@ -2986,42 +3030,66 @@ def retrieve_celltype_ak(
                     {
                         query
                         + "_gdT_VJ": "|".join(
-                            str(x) for x in list(dict.fromkeys(gdt_vj)) if present(x)
+                            str(x)
+                            for x in list(dict.fromkeys(gdt_vj))
+                            if present(x)
                         )
                     }
                 )
         elif retrieve_mode == "split and merge":
             if len(b_vdj) > 0:
                 cols.update(
-                    {query + "_B_VDJ": "|".join(str(x) for x in b_vdj if present(x))}
+                    {
+                        query
+                        + "_B_VDJ": "|".join(
+                            str(x) for x in b_vdj if present(x)
+                        )
+                    }
                 )
             if len(b_vj) > 0:
                 cols.update(
-                    {query + "_B_VJ": "|".join(str(x) for x in b_vj if present(x))}
+                    {
+                        query
+                        + "_B_VJ": "|".join(str(x) for x in b_vj if present(x))
+                    }
                 )
 
             if len(abt_vdj) > 0:
                 cols.update(
                     {
                         query
-                        + "_abT_VDJ": "|".join(str(x) for x in abt_vdj if present(x))
+                        + "_abT_VDJ": "|".join(
+                            str(x) for x in abt_vdj if present(x)
+                        )
                     }
                 )
             if len(abt_vj) > 0:
                 cols.update(
-                    {query + "_abT_VJ": "|".join(str(x) for x in abt_vj if present(x))}
+                    {
+                        query
+                        + "_abT_VJ": "|".join(
+                            str(x) for x in abt_vj if present(x)
+                        )
+                    }
                 )
 
             if len(gdt_vdj) > 0:
                 cols.update(
                     {
                         query
-                        + "_gdT_VDJ": "|".join(str(x) for x in gdt_vdj if present(x))
+                        + "_gdT_VDJ": "|".join(
+                            str(x) for x in gdt_vdj if present(x)
+                        )
                     }
                 )
             if len(gdt_vj) > 0:
                 cols.update(
-                    {query + "_gdT_VJ": "|".join(str(x) for x in gdt_vj if present(x))}
+                    {
+                        query
+                        + "_gdT_VJ": "|".join(
+                            str(x) for x in gdt_vj if present(x)
+                        )
+                    }
                 )
 
         elif retrieve_mode == "merge and unique only":
@@ -3029,7 +3097,9 @@ def retrieve_celltype_ak(
                 {
                     query: "|".join(
                         str(x)
-                        for x in set(b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj)
+                        for x in set(
+                            b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                        )
                         if present(x)
                     )
                 }
@@ -3037,13 +3107,23 @@ def retrieve_celltype_ak(
         elif retrieve_mode == "split and sum":
             if len(b_vdj) > 0:
                 cols.update(
-                    {query + "_B_VDJ": np.sum([float(x) for x in b_vdj if present(x)])}
+                    {
+                        query
+                        + "_B_VDJ": np.sum(
+                            [float(x) for x in b_vdj if present(x)]
+                        )
+                    }
                 )
             else:
                 cols.update({query + "_B_VDJ": np.nan})
             if len(b_vj) > 0:
                 cols.update(
-                    {query + "_B_VJ": np.sum([float(x) for x in b_vj if present(x)])}
+                    {
+                        query
+                        + "_B_VJ": np.sum(
+                            [float(x) for x in b_vj if present(x)]
+                        )
+                    }
                 )
             else:
                 cols.update({query + "_B_VJ": np.nan})
@@ -3052,7 +3132,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_abT_VDJ": np.sum([float(x) for x in abt_vdj if present(x)])
+                        + "_abT_VDJ": np.sum(
+                            [float(x) for x in abt_vdj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3061,7 +3143,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_abT_VJ": np.sum([float(x) for x in abt_vj if present(x)])
+                        + "_abT_VJ": np.sum(
+                            [float(x) for x in abt_vj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3071,7 +3155,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_gdT_VDJ": np.sum([float(x) for x in gdt_vdj if present(x)])
+                        + "_gdT_VDJ": np.sum(
+                            [float(x) for x in gdt_vdj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3080,7 +3166,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_gdT_VJ": np.sum([float(x) for x in gdt_vj if present(x)])
+                        + "_gdT_VJ": np.sum(
+                            [float(x) for x in gdt_vj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3088,13 +3176,23 @@ def retrieve_celltype_ak(
         elif retrieve_mode == "split and average":
             if len(b_vdj) > 0:
                 cols.update(
-                    {query + "_B_VDJ": np.mean([float(x) for x in b_vdj if present(x)])}
+                    {
+                        query
+                        + "_B_VDJ": np.mean(
+                            [float(x) for x in b_vdj if present(x)]
+                        )
+                    }
                 )
             else:
                 cols.update({query + "_B_VDJ": np.nan})
             if len(b_vj) > 0:
                 cols.update(
-                    {query + "_B_VJ": np.mean([float(x) for x in b_vj if present(x)])}
+                    {
+                        query
+                        + "_B_VJ": np.mean(
+                            [float(x) for x in b_vj if present(x)]
+                        )
+                    }
                 )
             else:
                 cols.update({query + "_B_VJ": np.nan})
@@ -3103,7 +3201,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_abT_VDJ": np.mean([float(x) for x in abt_vdj if present(x)])
+                        + "_abT_VDJ": np.mean(
+                            [float(x) for x in abt_vdj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3112,7 +3212,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_abT_VJ": np.mean([float(x) for x in abt_vj if present(x)])
+                        + "_abT_VJ": np.mean(
+                            [float(x) for x in abt_vj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3122,7 +3224,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_gdT_VDJ": np.mean([float(x) for x in gdt_vdj if present(x)])
+                        + "_gdT_VDJ": np.mean(
+                            [float(x) for x in gdt_vdj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3131,7 +3235,9 @@ def retrieve_celltype_ak(
                 cols.update(
                     {
                         query
-                        + "_gdT_VJ": np.mean([float(x) for x in gdt_vj if present(x)])
+                        + "_gdT_VJ": np.mean(
+                            [float(x) for x in gdt_vj if present(x)]
+                        )
                     }
                 )
             else:
@@ -3141,7 +3247,9 @@ def retrieve_celltype_ak(
                 {
                     query: "|".join(
                         x
-                        for x in (b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj)
+                        for x in (
+                            b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                        )
                         if present(x)
                     )
                 }
@@ -3171,7 +3279,12 @@ def retrieve_celltype_ak(
                     query: np.sum(
                         [
                             float(x)
-                            for x in b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                            for x in b_vdj
+                            + abt_vdj
+                            + gdt_vdj
+                            + b_vj
+                            + abt_vj
+                            + gdt_vj
                             if present(x)
                         ]
                     )
@@ -3185,7 +3298,12 @@ def retrieve_celltype_ak(
                     query: np.mean(
                         [
                             float(x)
-                            for x in b_vdj + abt_vdj + gdt_vdj + b_vj + abt_vj + gdt_vj
+                            for x in b_vdj
+                            + abt_vdj
+                            + gdt_vdj
+                            + b_vj
+                            + abt_vj
+                            + gdt_vj
                             if present(x)
                         ]
                     )

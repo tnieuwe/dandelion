@@ -1125,4 +1125,4 @@ def scverse_airr_io(
             airr_cells[cell_id] = tmp_cell
         tmp_cell.add_chain(chain_dict)
     ak_airr_cells = ak.Array((c.chains for c in airr_cells.values()))
-    return ak_airr_cells, count, airr_cells.keys()
+    return ak_airr_cells, count
